@@ -3,7 +3,7 @@
   'use strict';
   let key = '';
   let me = null;
-  let data = {devices: [], groups: [], links: [], events: [], jobs: []};
+  let data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
     const element = document.createElement(tag);
@@ -63,6 +63,8 @@
       options(select, data.devices, 'Select device');
     }
     options($('#assign-form select[name="group_id"]'), data.groups, 'Select group');
+    options($('#deployment-form select[name="group_id"]'), data.groups, 'Select group');
+    options($('#rule-form select[name="group_id"]'), data.groups, 'All devices');
     const devices = $('#device-list');
     devices.replaceChildren();
     const search = $('#search').value.toLowerCase().trim();
@@ -87,7 +89,7 @@
         action.addEventListener('click', async () => {
           try {
             await api(`/jobs/${item.id}/approve`, {method: 'POST'});
-            notice('Request approved. Execution is not implemented.');
+            notice('Request approved. Allowlisted Ansible actions require an enabled worker; review-only actions are never executed.');
             await refresh();
           } catch (error) { notice(error.message, true); }
         });
@@ -96,10 +98,17 @@
         `${item.schedule_at || 'No schedule'} · ${new Date(item.created_at).toLocaleString()}`, item.state, action);
     });
     if (!data.jobs.length) empty(jobs, 'No change requests yet.');
+    const rules = $('#rule-list');
+    rules.replaceChildren();
+    data.automation_rules.forEach((item) => card(rules, item.name,
+      `${item.severity} event · ${item.group_id ? data.groups.find((group) => group.id === item.group_id)?.name || 'Group' : 'All devices'} · ${item.operation.replaceAll('_', ' ')}`,
+      item.enabled ? 'enabled' : 'disabled'));
+    if (!data.automation_rules.length) empty(rules, 'No event trigger rules yet.');
     document.querySelectorAll('.form-card button').forEach((button) => { button.disabled = me.role === 'viewer'; });
+    $('#rule-form button').disabled = me.role !== 'admin';
   }
   async function refresh() {
-    const collections = ['devices', 'groups', 'links', 'events', 'jobs'];
+    const collections = ['devices', 'groups', 'links', 'events', 'jobs', 'automation_rules'];
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
     render();
@@ -121,7 +130,7 @@
   });
   $('#lock').addEventListener('click', () => {
     key = ''; me = null;
-    data = {devices: [], groups: [], links: [], events: [], jobs: []};
+    data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: []};
     $('#workspace').hidden = true;
     $('#login').hidden = false;
     $('#lock').hidden = true;
@@ -151,5 +160,8 @@
   form('#assign-form', (fields) => `/devices/${Number(fields.device_id)}/groups/${Number(fields.group_id)}`, () => ({}));
   form('#link-form', '/links', (fields) => ({...fields, source_id: Number(fields.source_id), target_id: Number(fields.target_id)}));
   form('#event-form', '/events', (fields) => ({...fields, device_id: Number(fields.device_id)}));
-  form('#job-form', '/jobs', (fields) => ({...fields, device_id: Number(fields.device_id), schedule_at: fields.schedule_at || null}));
+  const timestamp = (value) => value ? new Date(value).toISOString() : null;
+  form('#job-form', '/jobs', (fields) => ({...fields, device_id: Number(fields.device_id), schedule_at: timestamp(fields.schedule_at)}));
+  form('#deployment-form', '/deployments', (fields) => ({...fields, group_id: Number(fields.group_id), schedule_at: timestamp(fields.schedule_at)}));
+  form('#rule-form', '/automation_rules', (fields) => ({...fields, group_id: fields.group_id ? Number(fields.group_id) : null}));
 })();
