@@ -10,6 +10,8 @@ python3 app.py bootstrap "Example tenant"
 python3 app.py serve
 ```
 
+Open `http://127.0.0.1:8080/` on the same machine and enter the one-time bootstrap key. The responsive console works on desktop and mobile browsers and includes an installable web-app manifest. The key stays in tab memory; locking or closing the tab clears it. This is a mobile web console, **not** an Android APK or iOS native application. HTTPS and a proper identity provider are needed before phone access outside a trusted local environment.
+
 Save the bootstrap key in a secret manager. The service binds to `127.0.0.1:8080` by default. Do not expose it directly to the Internet. A production reverse proxy must enforce HTTPS, request limits, and appropriate identity controls.
 
 ```sh
@@ -32,6 +34,6 @@ Every record carries a tenant ID. Read and write queries scope by the authentica
 | Direct connections and remote desktop | Approval queue only | Brokered sessions with MFA, recording and expiring grants |
 | LDAP and network authentication | Not implemented | LDAP/OIDC provider, group mapping and least-privilege roles |
 | Server/device/node health | Not implemented | Agent telemetry, SNMPv3 and metrics retention |
-| Web, desktop, mobile apps | Not implemented | Shared API contract, responsive web app and packaged clients |
+| Web and mobile console | Responsive browser UI and web-app manifest | Native packages, secure authentication and production deployment |
 
 Remote control and mass deployment need explicit allowlists, per-device credentials in a vault, concurrent-operation limits, audit trails, rollback, and tenant boundary tests. The API must never treat uploaded device information as executable commands.
