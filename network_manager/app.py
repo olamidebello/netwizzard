@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT
 CREATE TABLE IF NOT EXISTS preferences(principal_id INTEGER PRIMARY KEY REFERENCES principals(id), tenant_id INTEGER NOT NULL, widgets TEXT NOT NULL, refresh_seconds INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(tenant_id,name));
 CREATE TABLE IF NOT EXISTS telemetry(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), agent_id INTEGER NOT NULL REFERENCES agents(id), status TEXT NOT NULL CHECK(status IN ('up','down','degraded')), cpu_percent REAL, memory_percent REAL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS alert_policies(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, metric TEXT NOT NULL CHECK(metric IN ('status_down','cpu_percent','memory_percent')), threshold REAL, severity TEXT NOT NULL CHECK(severity IN ('warning','critical')), group_id INTEGER REFERENCES groups(id), enabled INTEGER NOT NULL DEFAULT 1, created_by INTEGER NOT NULL REFERENCES principals(id), UNIQUE(tenant_id,name));
+CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, policy_id INTEGER NOT NULL REFERENCES alert_policies(id), device_id INTEGER NOT NULL REFERENCES devices(id), event_id INTEGER REFERENCES events(id), state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open','acknowledged','resolved')), first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, occurrences INTEGER NOT NULL DEFAULT 1, last_value REAL, acknowledged_by INTEGER REFERENCES principals(id), resolved_at TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS active_alert_per_policy_device ON alerts(tenant_id,policy_id,device_id) WHERE state IN ('open','acknowledged');
 CREATE TABLE IF NOT EXISTS session_requests(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), requested_by INTEGER NOT NULL REFERENCES principals(id), state TEXT NOT NULL DEFAULT 'awaiting_mfa', expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
@@ -100,6 +103,35 @@ def trigger_rules(db, tenant, device, severity):
         queue_job(db, tenant, device, rule["operation"], rule["created_by"])
         count += 1
     return count
+
+
+def evaluate_alerts(db, tenant, device, status, cpu, memory):
+    """Correlate each agent report with tenant policies, without duplicate open alerts."""
+    generated = 0
+    for policy in db.execute("SELECT * FROM alert_policies WHERE tenant_id=? AND enabled=1", (tenant,)).fetchall():
+        if policy["group_id"] is not None and not db.execute(
+                "SELECT 1 FROM memberships WHERE tenant_id=? AND device_id=? AND group_id=?",
+                (tenant, device, policy["group_id"])).fetchone():
+            continue
+        value = {"cpu_percent": cpu, "memory_percent": memory, "status_down": None}[policy["metric"]]
+        breach = status == "down" if policy["metric"] == "status_down" else value is not None and value >= policy["threshold"]
+        active = db.execute("SELECT id,event_id FROM alerts WHERE tenant_id=? AND policy_id=? AND device_id=? AND state IN ('open','acknowledged')",
+                            (tenant, policy["id"], device)).fetchone()
+        if breach and active:
+            db.execute("UPDATE alerts SET last_seen=?,occurrences=occurrences+1,last_value=? WHERE id=?", (now(), value, active["id"]))
+        elif breach:
+            message = f"Alert {policy['name']}: {policy['metric']}" + (f" {value:g}% >= {policy['threshold']:g}%" if value is not None else " reported down")
+            stamp = now()
+            event_id = db.execute("INSERT INTO events(tenant_id,device_id,severity,message,created_at) VALUES(?,?,?,?,?)",
+                                  (tenant,device,policy["severity"],message,stamp)).lastrowid
+            db.execute("INSERT INTO alerts(tenant_id,policy_id,device_id,event_id,first_seen,last_seen,last_value) VALUES(?,?,?,?,?,?,?)",
+                       (tenant,policy["id"],device,event_id,stamp,stamp,value))
+            trigger_rules(db, tenant, device, policy["severity"])
+            generated += 1
+        elif active:
+            db.execute("UPDATE alerts SET state='resolved',resolved_at=? WHERE id=?", (now(), active["id"]))
+            db.execute("UPDATE events SET status='resolved' WHERE id=? AND tenant_id=?", (active["event_id"],tenant))
+    return generated
 
 
 def validate_device_metadata(db, tenant, data):
@@ -261,9 +293,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     device = db.execute("INSERT INTO devices(tenant_id,name,address,kind,status) VALUES(?,?,?,?,?)", (tenant,name,address,kind,status)).lastrowid
                 db.execute("INSERT INTO telemetry(tenant_id,device_id,agent_id,status,cpu_percent,memory_percent,created_at) VALUES(?,?,?,?,?,?,?)", (tenant,device,agent["id"],status,*metrics,now()))
-                if status == "down" and (not existing or existing["status"] != "down"):
+                generated = evaluate_alerts(db,tenant,device,status,*metrics)
+                down_alert = db.execute("SELECT 1 FROM alerts JOIN alert_policies ON alert_policies.id=alerts.policy_id AND alert_policies.tenant_id=alerts.tenant_id WHERE alerts.tenant_id=? AND alerts.device_id=? AND alert_policies.metric='status_down' AND alerts.state IN ('open','acknowledged') LIMIT 1", (tenant,device)).fetchone()
+                if status == "down" and not down_alert and (not existing or existing["status"] != "down"):
                     db.execute("INSERT INTO events(tenant_id,device_id,severity,message,created_at) VALUES(?,?,?,?,?)", (tenant,device,"critical","Agent reported device down",now()))
-                return self.send(200, {"device_id": device, "status": status})
+                    trigger_rules(db,tenant,device,"critical")
+                return self.send(200, {"device_id": device, "status": status, "new_alerts": generated})
             user = self.principal(db)
             if not user:
                 return self.send(401, {"error": "Authentication required"})
@@ -309,6 +344,7 @@ class Handler(BaseHTTPRequestHandler):
                     "events": ("id", "device_id", "severity", "message", "status", "created_at"),
                     "jobs": ("id", "device_id", "operation", "schedule_at", "state", "created_at"),
                     "telemetry": ("id", "device_id", "agent_id", "status", "cpu_percent", "memory_percent", "created_at"),
+                    "alerts": ("id", "policy_id", "device_id", "state", "occurrences", "first_seen", "last_seen"),
                 }.get(path[1])
                 if not columns:
                     return self.send(404, {"error": "Unknown export"})
@@ -316,8 +352,49 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [list(row) for row in db.execute(f"SELECT {fields} FROM {path[1]} WHERE tenant_id=? ORDER BY id DESC" if path[1] != "memberships" else
                                                        f"SELECT {fields} FROM memberships WHERE tenant_id=? ORDER BY device_id,group_id", (tenant,))]
                 return self.send(200, {"name": path[1], "columns": columns, "rows": rows})
-            if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts", "agents", "telemetry"):
+            if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts", "agents", "telemetry", "alert_policies", "alerts"):
                 return self.send(404, {"error": "Not found"})
+            if path == ["alert_policies"] and method == "GET":
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,name,metric,threshold,severity,group_id,enabled FROM alert_policies WHERE tenant_id=? ORDER BY id DESC", (tenant,))])
+            if path == ["alert_policies"] and method == "POST":
+                if role != "admin": return self.send(403, {"error": "Admin required"})
+                data = self.body()
+                name, metric, severity = (str(data[k]).strip() for k in ("name", "metric", "severity"))
+                if not name or len(name)>100 or metric not in ("status_down","cpu_percent","memory_percent") or severity not in ("warning","critical"):
+                    return self.send(400, {"error": "Invalid alert policy"})
+                threshold = None if metric == "status_down" else data.get("threshold")
+                if metric != "status_down" and (type(threshold) not in (int,float) or not 0 <= threshold <= 100):
+                    return self.send(400, {"error": "Threshold must be 0 to 100 percent"})
+                group = data.get("group_id") or None
+                if group is not None:
+                    group = int(group)
+                    if not db.execute("SELECT 1 FROM groups WHERE id=? AND tenant_id=?", (group,tenant)).fetchone():
+                        return self.send(400, {"error": "Group must belong to this tenant"})
+                policy_id = db.execute("INSERT INTO alert_policies(tenant_id,name,metric,threshold,severity,group_id,created_by) VALUES(?,?,?,?,?,?,?)",
+                                       (tenant,name,metric,threshold,severity,group,user["id"])).lastrowid
+                self.audit(db,user,"create_alert_policy",str(policy_id))
+                return self.send(201, {"id":policy_id})
+            if resource == "alert_policies" and len(path)==3 and path[2] in ("pause","resume") and method=="POST":
+                if role != "admin": return self.send(403, {"error": "Admin required"})
+                enabled = path[2] == "resume"
+                changed = db.execute("UPDATE alert_policies SET enabled=? WHERE id=? AND tenant_id=?", (int(enabled),int(path[1]),tenant))
+                if not changed.rowcount: return self.send(404, {"error": "Policy not found"})
+                self.audit(db,user,path[2]+"_alert_policy",path[1])
+                return self.send(200, {"enabled":enabled})
+            if path == ["alerts"] and method == "GET":
+                return self.send(200, [dict(row) for row in db.execute("SELECT alerts.id,alerts.policy_id,alert_policies.name AS policy_name,alert_policies.severity,alerts.device_id,alerts.event_id,alerts.state,alerts.first_seen,alerts.last_seen,alerts.occurrences,alerts.last_value,alerts.acknowledged_by,alerts.resolved_at FROM alerts JOIN alert_policies ON alert_policies.id=alerts.policy_id AND alert_policies.tenant_id=alerts.tenant_id WHERE alerts.tenant_id=? ORDER BY alerts.id DESC LIMIT 500", (tenant,))])
+            if resource == "alerts" and len(path)==3 and path[2] in ("acknowledge","resolve") and method=="POST":
+                if role == "viewer": return self.send(403, {"error": "Operator required"})
+                wanted = "acknowledged" if path[2] == "acknowledge" else "resolved"
+                extra = ",acknowledged_by=?" if wanted == "acknowledged" else ",resolved_at=?"
+                value = user["id"] if wanted == "acknowledged" else now()
+                alert_id = int(path[1])
+                changed = db.execute(f"UPDATE alerts SET state=?{extra} WHERE id=? AND tenant_id=? AND state=?",
+                                     (wanted,value,alert_id,tenant,"open" if wanted == "acknowledged" else "acknowledged"))
+                if not changed.rowcount: return self.send(409, {"error": "Alert is unavailable for this action"})
+                db.execute("UPDATE events SET status=? WHERE id=(SELECT event_id FROM alerts WHERE id=? AND tenant_id=?) AND tenant_id=?", (wanted,alert_id,tenant,tenant))
+                self.audit(db,user,wanted+"_alert",path[1])
+                return self.send(200, {"state":wanted})
             if path == ["agents"] and method == "GET":
                 if role != "admin": return self.send(403, {"error": "Admin required"})
                 return self.send(200, [dict(row) for row in db.execute("SELECT id,name,active,created_at FROM agents WHERE tenant_id=? ORDER BY id", (tenant,))])
