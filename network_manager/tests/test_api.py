@@ -74,6 +74,24 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/platform/tenants", key="platform")[0], 200)
         self.assertEqual(self.call("GET", "/devices", key=result["api_key"])[1], [])
         self.assertEqual(self.call("GET", "/platform/tenants", key=result["api_key"])[0], 401)
+        tid = result["tenant_id"]
+        self.assertEqual(self.call("POST", f"/platform/tenants/{tid}/admins/{result['admin_id']}/revoke", key="platform", data={})[0], 409)
+        second = self.call("POST", f"/platform/tenants/{tid}/admins", key="platform", data={"name":"backup"})[1]
+        self.assertEqual(self.call("POST", f"/platform/tenants/{tid}/admins/{result['admin_id']}/revoke", key="platform", data={})[0], 200)
+        self.assertEqual(self.call("GET", "/me", key=result["api_key"])[0], 401)
+        self.assertEqual(self.call("GET", "/me", key=second["api_key"])[0], 200)
+        self.assertEqual(len(self.call("GET", "/platform/audit", key="platform")[1]), 3)
+
+    def test_telemetry_export_and_metadata_admin_boundary(self):
+        _, agent = self.call("POST", "/agents", data={"name":"monitor"})
+        self.call("POST", "/agent/report", key=agent["agent_key"], data={"name":"switch", "address":"192.0.2.5", "kind":"switch", "status":"up"})
+        status, export = self.call("GET", "/exports/telemetry")
+        self.assertEqual(status, 200)
+        self.assertEqual(export["rows"][0][3], "up")
+        self.assertEqual(self.call("GET", "/exports/telemetry", key="b")[1]["rows"], [])
+        _, operator = self.call("POST", "/users", data={"name":"operator", "role":"operator"})
+        device = self.call("GET", "/devices")[1][0]
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", key=operator["api_key"], data={"credential_ref":"vault://secret"})[0], 403)
 
     def test_expired_worker_claim_requires_review(self):
         import importlib
