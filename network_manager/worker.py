@@ -50,13 +50,16 @@ def run_job(job):
 
 def claim_one(db):
     db.execute("BEGIN IMMEDIATE")
+    # A crashed worker may have reached a device. Never replay that operation automatically.
+    db.execute("UPDATE jobs SET state='needs_review',lease_until=NULL WHERE state='running' AND lease_until<?", (app.now(),))
     row = db.execute("""SELECT jobs.*, devices.address FROM jobs
         JOIN devices ON devices.id=jobs.device_id AND devices.tenant_id=jobs.tenant_id
         WHERE jobs.state='approved' AND jobs.operation IN ('ansible_check','ansible_deploy')
         AND (jobs.schedule_at IS NULL OR jobs.schedule_at <= ?)
         ORDER BY jobs.id LIMIT 1""", (app.now(),)).fetchone()
     if row:
-        db.execute("UPDATE jobs SET state='running' WHERE id=? AND state='approved'", (row["id"],))
+        lease = (datetime.now(timezone.utc) + timedelta(minutes=16)).isoformat()
+        db.execute("UPDATE jobs SET state='running',lease_until=? WHERE id=? AND state='approved'", (lease,row["id"]))
     db.commit()
     return row
 
@@ -99,7 +102,7 @@ def run_once(executor=run_job):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             succeeded = False
         state = "succeeded" if succeeded else "failed"
-        db.execute("UPDATE jobs SET state=? WHERE id=? AND state='running'", (state, job["id"]))
+        db.execute("UPDATE jobs SET state=?,lease_until=NULL WHERE id=? AND state='running'", (state, job["id"]))
         db.execute("INSERT INTO events(tenant_id,device_id,severity,message,created_at) VALUES(?,?,?,?,?)",
                    (job["tenant_id"], job["device_id"], "info" if succeeded else "critical",
                     f"Ansible {job['operation']} job #{job['id']} {state}", app.now()))
