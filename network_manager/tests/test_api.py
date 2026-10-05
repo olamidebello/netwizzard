@@ -48,6 +48,25 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/jobs/{job['id']}/approve")[0], 409)
         self.assertEqual(self.call("GET", "/jobs")[1][0]["state"], "pending_approval")
 
+    def test_console_identity_is_tenant_scoped(self):
+        self.assertEqual(self.call("GET", "/me", key="a"),
+                         (200, {"tenant": "A", "name": "admin", "role": "admin"}))
+        self.assertEqual(self.call("GET", "/me", key="b")[1]["tenant"], "B")
+        self.assertEqual(self.call("GET", "/me", key="invalid")[0], 401)
+
+    def test_static_console_has_security_headers(self):
+        handler = object.__new__(app.Handler)
+        handler.path = "/"
+        handler.wfile = BytesIO()
+        headers = {}
+        handler.send_response = lambda status: headers.update(status=status)
+        handler.send_header = lambda name, value: headers.update({name: value})
+        handler.end_headers = lambda: None
+        handler.do_GET()
+        self.assertEqual(headers["status"], 200)
+        self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+        self.assertIn(b"Netwizzard Console", handler.wfile.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
