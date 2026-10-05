@@ -3,7 +3,7 @@
   'use strict';
   let key = '';
   let me = null;
-  let data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: []};
+  let data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: [], schedules: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
     const element = document.createElement(tag);
@@ -65,6 +65,7 @@
     options($('#assign-form select[name="group_id"]'), data.groups, 'Select group');
     options($('#deployment-form select[name="group_id"]'), data.groups, 'Select group');
     options($('#rule-form select[name="group_id"]'), data.groups, 'All devices');
+    options($('#schedule-form select[name="group_id"]'), data.groups, 'Select group');
     const devices = $('#device-list');
     devices.replaceChildren();
     const search = $('#search').value.toLowerCase().trim();
@@ -104,11 +105,30 @@
       `${item.severity} event · ${item.group_id ? data.groups.find((group) => group.id === item.group_id)?.name || 'Group' : 'All devices'} · ${item.operation.replaceAll('_', ' ')}`,
       item.enabled ? 'enabled' : 'disabled'));
     if (!data.automation_rules.length) empty(rules, 'No event trigger rules yet.');
+    const schedules = $('#schedule-list');
+    schedules.replaceChildren();
+    data.schedules.forEach((item) => {
+      const action = node('button', 'secondary', item.enabled ? 'Pause' : 'Resume');
+      action.type = 'button';
+      action.disabled = me.role !== 'admin';
+      action.addEventListener('click', async () => {
+        try {
+          await api(`/schedules/${item.id}/${item.enabled ? 'pause' : 'resume'}`, {method: 'POST'});
+          notice(`Schedule ${item.enabled ? 'paused' : 'resumed'}.`);
+          await refresh();
+        } catch (error) { notice(error.message, true); }
+      });
+      const group = data.groups.find((entry) => entry.id === item.group_id)?.name || 'Group';
+      card(schedules, item.name, `${group} · ${item.operation.replaceAll('_', ' ')} · every ${item.interval_seconds / 60} min · next ${new Date(item.next_run_at).toLocaleString()}`,
+        item.enabled ? 'active' : 'paused', action);
+    });
+    if (!data.schedules.length) empty(schedules, 'No recurring schedules yet.');
     document.querySelectorAll('.form-card button').forEach((button) => { button.disabled = me.role === 'viewer'; });
     $('#rule-form button').disabled = me.role !== 'admin';
+    $('#schedule-form button').disabled = me.role !== 'admin';
   }
   async function refresh() {
-    const collections = ['devices', 'groups', 'links', 'events', 'jobs', 'automation_rules'];
+    const collections = ['devices', 'groups', 'links', 'events', 'jobs', 'automation_rules', 'schedules'];
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
     render();
@@ -130,7 +150,7 @@
   });
   $('#lock').addEventListener('click', () => {
     key = ''; me = null;
-    data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: []};
+    data = {devices: [], groups: [], links: [], events: [], jobs: [], automation_rules: [], schedules: []};
     $('#workspace').hidden = true;
     $('#login').hidden = false;
     $('#lock').hidden = true;
@@ -164,4 +184,5 @@
   form('#job-form', '/jobs', (fields) => ({...fields, device_id: Number(fields.device_id), schedule_at: timestamp(fields.schedule_at)}));
   form('#deployment-form', '/deployments', (fields) => ({...fields, group_id: Number(fields.group_id), schedule_at: timestamp(fields.schedule_at)}));
   form('#rule-form', '/automation_rules', (fields) => ({...fields, group_id: fields.group_id ? Number(fields.group_id) : null}));
+  form('#schedule-form', '/schedules', (fields) => ({...fields, group_id: Number(fields.group_id), interval_seconds: Number(fields.interval_seconds), next_run_at: timestamp(fields.next_run_at)}));
 })();
