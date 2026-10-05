@@ -4,3 +4,4 @@
 .tags{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}.tags button{font-size:.68rem}#generated-key{display:block;overflow-wrap:anywhere;background:#e7f2f0;padding:12px;border-radius:8px;margin-bottom:10px}
 #script-preview{white-space:pre-wrap;overflow-wrap:anywhere;background:#102b39;color:#e7f5f3;padding:18px;border-radius:12px;max-height:400px;overflow:auto}
 .toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}.toolbar input{min-width:180px}.dashboard-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.dashboard-grid .form-card{margin:0}.widget-controls{display:flex;flex-wrap:wrap;gap:16px;margin:0 0 18px}.widget-controls label{display:flex;align-items:center;gap:6px}.widget-controls input{width:auto;min-height:0}@media(max-width:850px){.dashboard-grid{grid-template-columns:1fr}}
+.job-select{width:20px;min-height:20px;height:20px;accent-color:#147f86}
