@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS schedules(id INTEGER PRIMARY KEY, tenant_id INTEGER N
 CREATE TABLE IF NOT EXISTS schedule_runs(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, schedule_id INTEGER NOT NULL REFERENCES schedules(id), due_at TEXT NOT NULL, created_at TEXT NOT NULL, job_count INTEGER NOT NULL, UNIQUE(schedule_id,due_at));
 CREATE TABLE IF NOT EXISTS config_drafts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), content TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stored', created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS preferences(principal_id INTEGER PRIMARY KEY REFERENCES principals(id), tenant_id INTEGER NOT NULL, widgets TEXT NOT NULL, refresh_seconds INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
 """
 
 
@@ -160,7 +161,35 @@ class Handler(BaseHTTPRequestHandler):
             if path == ["me"] and method == "GET":
                 name = db.execute("SELECT name FROM tenants WHERE id=?", (tenant,)).fetchone()[0]
                 return self.send(200, {"id": user["id"], "tenant": name, "name": user["name"], "role": role})
+            if path == ["preferences"] and method == "GET":
+                row = db.execute("SELECT widgets,refresh_seconds FROM preferences WHERE principal_id=? AND tenant_id=?", (user["id"], tenant)).fetchone()
+                return self.send(200, {"widgets": json.loads(row["widgets"]), "refresh_seconds": row["refresh_seconds"]} if row else
+                                 {"widgets": {"devices": True, "tasks": True, "events": True}, "refresh_seconds": 0})
+            if path == ["preferences"] and method == "POST":
+                data = self.body()
+                widgets = data.get("widgets")
+                refresh = data.get("refresh_seconds")
+                if not isinstance(widgets, dict) or set(widgets) != {"devices", "tasks", "events"} or any(type(value) is not bool for value in widgets.values()) or refresh not in (0, 30, 60):
+                    return self.send(400, {"error": "Invalid dashboard preferences"})
+                db.execute("INSERT INTO preferences(principal_id,tenant_id,widgets,refresh_seconds,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(principal_id) DO UPDATE SET widgets=excluded.widgets,refresh_seconds=excluded.refresh_seconds,updated_at=excluded.updated_at",
+                           (user["id"], tenant, json.dumps(widgets), refresh, now()))
+                return self.send(200, {"widgets": widgets, "refresh_seconds": refresh})
             resource = path[0]
+            if method == "POST" and path == ["jobs", "approve-batch"]:
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                ids = self.body().get("job_ids")
+                if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(value) is not int for value in ids) or len(set(ids)) != len(ids):
+                    return self.send(400, {"error": "Choose 1 to 100 distinct job IDs"})
+                db.execute("BEGIN IMMEDIATE")
+                placeholders = ",".join("?" for _ in ids)
+                jobs = db.execute(f"SELECT id,state,requested_by FROM jobs WHERE tenant_id=? AND id IN ({placeholders})", [tenant, *ids]).fetchall()
+                if len(jobs) != len(ids) or any(job["state"] != "pending_approval" or job["requested_by"] == user["id"] for job in jobs):
+                    return self.send(409, {"error": "Every job must be pending and requested by another admin"})
+                db.executemany("UPDATE jobs SET state='approved',approved_by=? WHERE tenant_id=? AND id=? AND state='pending_approval'",
+                               [(user["id"], tenant, job_id) for job_id in ids])
+                self.audit(db, user, "approve_batch", ",".join(map(str, ids)))
+                return self.send(200, {"approved": ids})
             if method == "GET" and resource == "exports" and len(path) == 2:
                 columns = {
                     "devices": ("id", "name", "address", "kind", "status", "notes"),
@@ -281,6 +310,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = [dict(row) for row in rows]
                 if resource == "jobs":
                     for item in result:
+                        item["can_approve"] = role == "admin" and item["state"] == "pending_approval" and item["requested_by"] != user["id"]
                         item.pop("requested_by", None)
                         item.pop("approved_by", None)
                 if resource == "automation_rules":
@@ -299,6 +329,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(404, {"error": "Schedule not found"})
                 db.execute("UPDATE schedules SET enabled=? WHERE id=? AND tenant_id=?", (wanted, int(path[1]), tenant))
                 self.audit(db, user, path[2] + "_schedule", path[1])
+                return self.send(200, {"enabled": bool(wanted)})
+            if method == "POST" and resource == "automation_rules" and len(path) == 3 and path[2] in ("enable", "disable"):
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                wanted = 1 if path[2] == "enable" else 0
+                result = db.execute("UPDATE automation_rules SET enabled=? WHERE id=? AND tenant_id=?", (wanted, int(path[1]), tenant))
+                if not result.rowcount:
+                    return self.send(404, {"error": "Rule not found"})
+                self.audit(db, user, path[2] + "_rule", path[1])
                 return self.send(200, {"enabled": bool(wanted)})
             if method == "POST" and path == ["deployments"]:
                 if role == "viewer":
