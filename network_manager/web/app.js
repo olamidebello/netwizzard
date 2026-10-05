@@ -33,6 +33,24 @@
     const list = $('#tenant-list'); list.replaceChildren();
     tenants.forEach((item) => card(list, item.name, `Tenant #${item.id} · ${item.users} users`, 'tenant'));
     options($('#tenant-admin-form select[name="tenant_id"]'), tenants, 'Select tenant');
+    const admins = $('#platform-admin-list'); admins.replaceChildren();
+    for (const tenant of tenants) {
+      const entries = await api(`/platform/tenants/${tenant.id}/admins`);
+      entries.forEach((entry) => {
+        const revoke = node('button', 'secondary', 'Revoke'); revoke.type='button'; revoke.disabled=!entry.active || entries.filter((value)=>value.active).length<=1;
+        revoke.addEventListener('click', async () => {
+          if (!confirm(`Revoke ${entry.name} from ${tenant.name}?`)) return;
+          try { await api(`/platform/tenants/${tenant.id}/admins/${entry.id}/revoke`, {method:'POST'}); await refreshPlatform(); $('#platform-notice').textContent='Tenant administrator revoked.'; }
+          catch (error) { $('#platform-notice').textContent=error.message; }
+        });
+        card(admins, `${entry.name} · ${tenant.name}`, `Admin #${entry.id}`, entry.active?'active':'revoked', revoke);
+      });
+    }
+    if (!tenants.length) empty(list, 'No tenants yet.');
+    if (!admins.children.length) empty(admins, 'No tenant administrators.');
+    const activity = $('#platform-audit-list'); activity.replaceChildren();
+    (await api('/platform/audit')).forEach((item) => card(activity, item.action.replaceAll('_',' '), `Target ${item.target} · ${new Date(item.created_at).toLocaleString()}`));
+    if (!activity.children.length) empty(activity, 'No platform activity yet.');
   }
   function platformResult(result) {
     $('#platform-key code').textContent = result.api_key;
@@ -79,6 +97,8 @@
     options($('#rule-form select[name="group_id"]'), data.groups, 'All devices');
     options($('#schedule-form select[name="group_id"]'), data.groups, 'Select group');
     options($('#device-form select[name="owner_id"]'), data.users.filter((user) => user.active), 'Unassigned');
+    options($('#ownership-form select[name="owner_id"]'), data.users.filter((user) => user.active), 'Unassigned');
+    options($('#telemetry-device'), data.devices, 'All devices');
     const devices = $('#device-list');
     devices.replaceChildren();
     const search = $('#search').value.toLowerCase().trim();
@@ -140,7 +160,8 @@
     if (!data.links.length) empty(links, 'No topology links have been recorded.');
     const events = $('#event-list');
     events.replaceChildren();
-    data.events.forEach((item) => {
+    const eventSearch = $('#event-search').value.toLowerCase().trim();
+    data.events.filter((item) => `${item.message} ${deviceName(item.device_id)} ${item.severity} ${item.status}`.toLowerCase().includes(eventSearch)).forEach((item) => {
       const actions = node('div', 'tags');
       if (me.role !== 'viewer' && item.status !== 'resolved') {
         for (const action of item.status === 'open' ? ['acknowledge', 'resolve'] : ['resolve']) {
@@ -153,10 +174,16 @@
       }
       card(events, item.message, `${deviceName(item.device_id)} · ${new Date(item.created_at).toLocaleString()} · ${item.status}`, item.severity, actions);
     });
-    if (!data.events.length) empty(events, 'No events have been recorded.');
+    if (!events.children.length) empty(events, eventSearch ? 'No matching events.' : 'No events have been recorded.');
+    const telemetry = $('#telemetry-list'); telemetry.replaceChildren();
+    const selectedDevice = Number($('#telemetry-device').value);
+    data.telemetry.filter((item) => !selectedDevice || item.device_id === selectedDevice).forEach((item) =>
+      card(telemetry, deviceName(item.device_id), `Agent #${item.agent_id} · CPU ${item.cpu_percent ?? '—'}% · memory ${item.memory_percent ?? '—'}% · ${new Date(item.created_at).toLocaleString()}`, item.status));
+    if (!telemetry.children.length) empty(telemetry, 'No agent telemetry for this selection.');
     const jobs = $('#job-list');
     jobs.replaceChildren();
-    data.jobs.forEach((item) => {
+    const jobSearch = $('#job-search').value.toLowerCase().trim();
+    data.jobs.filter((item) => `${item.operation} ${deviceName(item.device_id)} ${item.state} ${item.id}`.toLowerCase().includes(jobSearch)).forEach((item) => {
       const actions = node('div', 'tags');
       if (item.can_approve) {
         const choice = node('input'); choice.type = 'checkbox'; choice.className = 'job-select'; choice.value = String(item.id);
@@ -183,7 +210,7 @@
       card(jobs, `${item.operation.replaceAll('_', ' ')} · ${deviceName(item.device_id)}`,
         `${item.schedule_at || 'No schedule'} · ${new Date(item.created_at).toLocaleString()}`, item.state, actions);
     });
-    if (!data.jobs.length) empty(jobs, 'No change requests yet.');
+    if (!jobs.children.length) empty(jobs, jobSearch ? 'No matching tasks.' : 'No change requests yet.');
     for (const [widget, items, format] of [
       ['devices', data.devices, (item) => [item.name, `${item.kind} · ${item.address}`]],
       ['tasks', data.jobs, (item) => [`${item.operation.replaceAll('_', ' ')} · ${deviceName(item.device_id)}`, item.state]],
@@ -269,10 +296,13 @@
     $('#user-form button').disabled = me.role !== 'admin';
     $('#script-form button').disabled = me.role !== 'admin';
     $('#agent-form button').disabled = me.role !== 'admin';
+    $('#ownership-form button').disabled = me.role !== 'admin';
+    $('#device-form select[name="owner_id"]').disabled = me.role !== 'admin';
+    $('#device-form input[name="credential_ref"]').disabled = me.role !== 'admin';
     document.querySelectorAll('[data-widget]').forEach((box) => { $(`#widget-${box.dataset.widget}`).hidden = !box.checked; });
   }
   async function refresh() {
-    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs'];
+    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs', 'telemetry'];
     if (me.role === 'admin') collections.push('users', 'scripts', 'agents');
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
@@ -340,6 +370,10 @@
     box.addEventListener('change', () => { render(); savePreferences(); });
   });
   $('#search').addEventListener('input', render);
+  $('#event-search').addEventListener('input', render);
+  $('#job-search').addEventListener('input', render);
+  $('#telemetry-device').addEventListener('change', render);
+  $('#telemetry-refresh').addEventListener('click', () => refresh().then(() => notice('Telemetry refreshed.')).catch((error) => notice(error.message,true)));
   document.querySelectorAll('.tabs button').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.tabs button').forEach((tab) => tab.removeAttribute('aria-current'));
     button.setAttribute('aria-current', 'page');
@@ -359,6 +393,7 @@
     });
   }
   form('#device-form', '/devices');
+  form('#ownership-form', (fields) => `/devices/${Number(fields.device_id)}/update`, (fields) => ({owner_id:fields.owner_id ? Number(fields.owner_id) : null,credential_ref:fields.credential_ref}));
   $('#tenant-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     try { platformResult(await api('/platform/tenants', {method:'POST',body:Object.fromEntries(new FormData(event.currentTarget))})); event.currentTarget.reset(); await refreshPlatform(); }
