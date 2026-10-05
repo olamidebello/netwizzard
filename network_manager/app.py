@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS links(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT N
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER REFERENCES devices(id) ON DELETE SET NULL, severity TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), operation TEXT NOT NULL, schedule_at TEXT, state TEXT NOT NULL DEFAULT 'pending_approval', requested_by INTEGER NOT NULL REFERENCES principals(id), approved_by INTEGER REFERENCES principals(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, principal_id INTEGER NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS automation_rules(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, severity TEXT NOT NULL CHECK(severity IN ('info','warning','critical')), operation TEXT NOT NULL CHECK(operation IN ('ansible_check','ansible_deploy')), group_id INTEGER REFERENCES groups(id), created_by INTEGER NOT NULL REFERENCES principals(id), enabled INTEGER NOT NULL DEFAULT 1, UNIQUE(tenant_id,name));
 """
 
 
@@ -46,6 +47,36 @@ def connect():
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+ANSIBLE_OPERATIONS = ("ansible_check", "ansible_deploy")
+
+
+def queue_job(db, tenant, device, operation, requester, schedule_at=None):
+    return db.execute("INSERT INTO jobs(tenant_id,device_id,operation,schedule_at,requested_by,created_at) VALUES(?,?,?,?,?,?)",
+                      (tenant, device, operation, schedule_at, requester, now())).lastrowid
+
+
+def schedule(value):
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Schedule must include a timezone offset")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def trigger_rules(db, tenant, device, severity):
+    rules = db.execute("SELECT * FROM automation_rules WHERE tenant_id=? AND severity=? AND enabled=1", (tenant, severity)).fetchall()
+    count = 0
+    for rule in rules:
+        if rule["group_id"] is not None and not db.execute(
+                "SELECT 1 FROM memberships WHERE tenant_id=? AND device_id=? AND group_id=?",
+                (tenant, device, rule["group_id"])).fetchone():
+            continue
+        queue_job(db, tenant, device, rule["operation"], rule["created_by"])
+        count += 1
+    return count
 
 
 def bootstrap(name):
@@ -122,18 +153,43 @@ class Handler(BaseHTTPRequestHandler):
                 name = db.execute("SELECT name FROM tenants WHERE id=?", (tenant,)).fetchone()[0]
                 return self.send(200, {"tenant": name, "name": user["name"], "role": role})
             resource = path[0]
-            if resource not in ("devices", "groups", "links", "events", "jobs", "audit"):
+            if resource not in ("devices", "groups", "links", "events", "jobs", "audit", "automation_rules", "deployments"):
                 return self.send(404, {"error": "Not found"})
-            if method == "GET" and len(path) == 1:
+            if method == "GET" and len(path) == 1 and resource != "deployments":
                 rows = db.execute(f"SELECT * FROM {resource} WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))
                 result = [dict(row) for row in rows]
                 if resource == "jobs":
                     for item in result:
                         item.pop("requested_by", None)
                         item.pop("approved_by", None)
+                if resource == "automation_rules":
+                    for item in result:
+                        item.pop("created_by", None)
                 return self.send(200, result)
+            if method == "POST" and path == ["deployments"]:
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                data = self.body()
+                operation = data.get("operation")
+                if operation not in ANSIBLE_OPERATIONS:
+                    return self.send(400, {"error": "Unsupported deployment operation"})
+                ids = data.get("device_ids", [])
+                group_id = data.get("group_id")
+                if group_id is not None:
+                    if not db.execute("SELECT 1 FROM groups WHERE id=? AND tenant_id=?", (int(group_id), tenant)).fetchone():
+                        return self.send(404, {"error": "Group not found"})
+                    ids = [row[0] for row in db.execute("SELECT device_id FROM memberships WHERE tenant_id=? AND group_id=?", (tenant, int(group_id)))]
+                if not isinstance(ids, list) or not ids or len(ids) > 100 or len(set(map(int, ids))) != len(ids):
+                    return self.send(400, {"error": "Select 1 to 100 distinct devices"})
+                ids = [int(value) for value in ids]
+                found = db.execute(f"SELECT count(*) FROM devices WHERE tenant_id=? AND id IN ({','.join('?' for _ in ids)})", [tenant, *ids]).fetchone()[0]
+                if found != len(ids):
+                    return self.send(404, {"error": "Device not found in tenant"})
+                created = [queue_job(db, tenant, device, operation, user["id"], schedule(data.get("schedule_at"))) for device in ids]
+                self.audit(db, user, "create_deployment", f"{operation}:{len(created)}")
+                return self.send(201, {"job_ids": created, "state": "pending_approval"})
             if method == "POST" and len(path) == 1:
-                if role == "viewer" or resource == "audit":
+                if role == "viewer" or resource == "audit" or (resource == "automation_rules" and role != "admin"):
                     return self.send(403, {"error": "Forbidden"})
                 data = self.body()
                 if resource == "devices":
@@ -155,15 +211,24 @@ class Handler(BaseHTTPRequestHandler):
                         return self.send(404, {"error": "Device not found"})
                     cur = db.execute("INSERT INTO events(tenant_id,device_id,severity,message,created_at) VALUES(?,?,?,?,?)",
                                      (tenant, device, str(data["severity"]), str(data["message"]), now()))
+                    trigger_rules(db, tenant, device, str(data["severity"]))
                 elif resource == "jobs":
                     device = int(data["device_id"])
                     if not db.execute("SELECT 1 FROM devices WHERE id=? AND tenant_id=?", (device, tenant)).fetchone():
                         return self.send(404, {"error": "Device not found"})
                     operation = str(data["operation"])
-                    if operation not in ("backup", "config_review", "patch_review", "remote_session"):
+                    if operation not in ("backup", "config_review", "patch_review", "remote_session", *ANSIBLE_OPERATIONS):
                         return self.send(400, {"error": "Unsupported operation"})
                     cur = db.execute("INSERT INTO jobs(tenant_id,device_id,operation,schedule_at,requested_by,created_at) VALUES(?,?,?,?,?,?)",
-                                     (tenant, device, operation, data.get("schedule_at"), user["id"], now()))
+                                     (tenant, device, operation, schedule(data.get("schedule_at")), user["id"], now()))
+                elif resource == "automation_rules":
+                    group_id = data.get("group_id") or None
+                    if group_id is not None and not db.execute("SELECT 1 FROM groups WHERE id=? AND tenant_id=?", (int(group_id), tenant)).fetchone():
+                        return self.send(404, {"error": "Group not found"})
+                    if data.get("operation") not in ANSIBLE_OPERATIONS:
+                        return self.send(400, {"error": "Unsupported operation"})
+                    cur = db.execute("INSERT INTO automation_rules(tenant_id,name,severity,operation,group_id,created_by) VALUES(?,?,?,?,?,?)",
+                                     (tenant, str(data["name"]), str(data["severity"]), data["operation"], group_id, user["id"]))
                 self.audit(db, user, "create_" + resource, str(cur.lastrowid))
                 return self.send(201, {"id": cur.lastrowid})
             if method == "POST" and resource == "devices" and len(path) == 4 and path[2] == "groups":
