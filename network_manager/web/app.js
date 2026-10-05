@@ -4,7 +4,7 @@
   let key = '';
   let me = null;
   let refreshTimer = null;
-  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: [], audit: [], schedule_runs: []};
+  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], config_drafts: [], audit: [], schedule_runs: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
     const element = document.createElement(tag);
@@ -27,6 +27,17 @@
     const body = await response.json();
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
+  }
+  async function refreshPlatform() {
+    const tenants = await api('/platform/tenants');
+    const list = $('#tenant-list'); list.replaceChildren();
+    tenants.forEach((item) => card(list, item.name, `Tenant #${item.id} · ${item.users} users`, 'tenant'));
+    options($('#tenant-admin-form select[name="tenant_id"]'), tenants, 'Select tenant');
+  }
+  function platformResult(result) {
+    $('#platform-key code').textContent = result.api_key;
+    $('#platform-key').hidden = false;
+    $('#platform-notice').textContent = 'Save the one-time key securely. It cannot be retrieved later.';
   }
   const deviceName = (id) => data.devices.find((device) => device.id === id)?.name || `Device #${id}`;
   function card(parent, title, subtitle, badge, action) {
@@ -67,6 +78,7 @@
     options($('#deployment-form select[name="group_id"]'), data.groups, 'Select group');
     options($('#rule-form select[name="group_id"]'), data.groups, 'All devices');
     options($('#schedule-form select[name="group_id"]'), data.groups, 'Select group');
+    options($('#device-form select[name="owner_id"]'), data.users.filter((user) => user.active), 'Unassigned');
     const devices = $('#device-list');
     devices.replaceChildren();
     const search = $('#search').value.toLowerCase().trim();
@@ -93,7 +105,7 @@
         try { await api(`/devices/${item.id}/update`, {method: 'POST', body: {name, address, kind}}); await refresh(); notice('Device updated.'); }
         catch (error) { notice(error.message, true); }
       }); tags.append(edit);
-      card(devices, item.name, `${item.kind} · ${item.address}${item.notes ? ` · ${item.notes}` : ''}`, item.status, tags);
+      card(devices, item.name, `${item.kind} · ${item.address}${item.owner_id ? ` · owner #${item.owner_id}` : ''}${item.credential_ref ? ' · vault reference set' : ''}${item.notes ? ` · ${item.notes}` : ''}`, item.status, tags);
     });
     if (!shown.length) empty(devices, search ? 'No devices match your search.' : 'No devices yet. Add your first device.');
     const groups = $('#group-list'); groups.replaceChildren();
@@ -235,6 +247,17 @@
       card(scripts, item.name, `SHA-256 ${item.sha256.slice(0, 16)}… · ${new Date(item.created_at).toLocaleString()}`, 'stored', view);
     });
     if (!data.scripts.length) empty(scripts, me.role === 'admin' ? 'No scripts uploaded.' : 'Admin access required.');
+    const agents = $('#agent-list'); agents.replaceChildren();
+    if (me.role === 'admin') data.agents.forEach((item) => {
+      const revoke = node('button', 'secondary', 'Revoke'); revoke.type = 'button'; revoke.disabled = !item.active;
+      revoke.addEventListener('click', async () => {
+        if (!confirm(`Revoke agent ${item.name}?`)) return;
+        try { await api(`/agents/${item.id}/revoke`, {method:'POST'}); await refresh(); notice('Agent revoked.'); }
+        catch (error) { notice(error.message, true); }
+      });
+      card(agents, item.name, `Agent #${item.id}`, item.active ? 'active' : 'revoked', revoke);
+    });
+    if (!data.agents.length) empty(agents, 'No agents enrolled.');
     const activity = $('#activity-list'); activity.replaceChildren();
     data.audit.forEach((entry) => card(activity, entry.action.replaceAll('_', ' '), `Target ${entry.target} · ${new Date(entry.created_at).toLocaleString()}`));
     data.schedule_runs.forEach((entry) => card(activity, `Schedule #${entry.schedule_id} ran`, `${entry.job_count} jobs queued · ${new Date(entry.created_at).toLocaleString()}`));
@@ -245,11 +268,12 @@
     $('#schedule-form button').disabled = me.role !== 'admin';
     $('#user-form button').disabled = me.role !== 'admin';
     $('#script-form button').disabled = me.role !== 'admin';
+    $('#agent-form button').disabled = me.role !== 'admin';
     document.querySelectorAll('[data-widget]').forEach((box) => { $(`#widget-${box.dataset.widget}`).hidden = !box.checked; });
   }
   async function refresh() {
     const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs'];
-    if (me.role === 'admin') collections.push('users', 'scripts');
+    if (me.role === 'admin') collections.push('users', 'scripts', 'agents');
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
     render();
@@ -258,7 +282,15 @@
     event.preventDefault();
     key = $('#key').value.trim();
     try {
-      me = await api('/me');
+      try { me = await api('/me'); }
+      catch (error) {
+        if (!error.message.includes('Authentication required')) throw error;
+        me = await api('/platform/me');
+        await refreshPlatform();
+        $('#login').hidden = true; $('#platform').hidden = false; $('#lock').hidden = false;
+        $('#identity').textContent = 'Platform administrator'; $('#key').value = '';
+        return;
+      }
       const prefs = await api('/preferences');
       $('#refresh-interval').value = String(prefs.refresh_seconds);
       document.querySelectorAll('[data-widget]').forEach((box) => { box.checked = prefs.widgets[box.dataset.widget]; });
@@ -276,10 +308,12 @@
   $('#lock').addEventListener('click', () => {
     if (refreshTimer) clearInterval(refreshTimer);
     key = ''; me = null;
-    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: [], audit: [], schedule_runs: []};
+    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], config_drafts: [], audit: [], schedule_runs: []};
     $('#generated-key').textContent = ''; $('#one-time-key').hidden = true;
     $('#script-preview').textContent = ''; $('#script-preview').hidden = true;
     $('#workspace').hidden = true;
+    $('#platform').hidden = true;
+    $('#platform-key code').textContent = ''; $('#platform-key').hidden = true;
     $('#login').hidden = false;
     $('#lock').hidden = true;
   });
@@ -325,6 +359,27 @@
     });
   }
   form('#device-form', '/devices');
+  $('#tenant-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try { platformResult(await api('/platform/tenants', {method:'POST',body:Object.fromEntries(new FormData(event.currentTarget))})); event.currentTarget.reset(); await refreshPlatform(); }
+    catch (error) { $('#platform-notice').textContent = error.message; }
+  });
+  $('#tenant-admin-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const fields = Object.fromEntries(new FormData(event.currentTarget));
+    try { platformResult(await api(`/platform/tenants/${Number(fields.tenant_id)}/admins`, {method:'POST',body:{name:fields.name}})); event.currentTarget.reset(); await refreshPlatform(); }
+    catch (error) { $('#platform-notice').textContent = error.message; }
+  });
+  $('#platform-key-hide').addEventListener('click', () => { $('#platform-key code').textContent=''; $('#platform-key').hidden=true; });
+  $('#agent-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      const result = await api('/agents', {method:'POST', body:Object.fromEntries(new FormData(event.currentTarget))});
+      $('#agent-key code').textContent = result.agent_key; $('#agent-key').hidden = false;
+      event.currentTarget.reset(); await refresh(); notice('Agent created. Save its one-time key securely.');
+    } catch (error) { notice(error.message, true); }
+  });
+  $('#hide-agent-key').addEventListener('click', () => { $('#agent-key code').textContent=''; $('#agent-key').hidden=true; });
   form('#group-form', '/groups');
   form('#assign-form', (fields) => `/devices/${Number(fields.device_id)}/groups/${Number(fields.group_id)}`, () => ({}));
   form('#link-form', '/links', (fields) => ({...fields, source_id: Number(fields.source_id), target_id: Number(fields.target_id)}));
