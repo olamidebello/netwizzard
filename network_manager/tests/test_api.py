@@ -177,6 +177,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/jobs/{job['id']}/cancel", data={})[1]["state"], "cancelled")
         self.assertEqual(self.call("POST", f"/jobs/{job['id']}/approve", key="c", data={})[0], 409)
 
+    def test_batch_approval_is_atomic_and_separate_admin(self):
+        _, device = self.call("POST", "/devices", data={"name": "edge", "address": "192.0.2.1", "kind": "router"})
+        jobs = [self.call("POST", "/jobs", data={"device_id": device["id"], "operation": "ansible_check"})[1]["id"] for _ in range(2)]
+        self.assertEqual(self.call("POST", "/jobs/approve-batch", key="a", data={"job_ids": jobs})[0], 409)
+        self.assertTrue(all(item["state"] == "pending_approval" for item in self.call("GET", "/jobs")[1]))
+        self.assertEqual(self.call("POST", "/jobs/approve-batch", key="c", data={"job_ids": jobs})[1]["approved"], jobs)
+        self.assertTrue(all(item["state"] == "approved" for item in self.call("GET", "/jobs")[1]))
+        self.assertEqual(self.call("POST", "/jobs/approve-batch", key="b", data={"job_ids": jobs})[0], 409)
+
+    def test_preferences_and_rule_toggle_are_tenant_scoped(self):
+        initial = self.call("GET", "/preferences")[1]
+        self.assertEqual(initial["refresh_seconds"], 0)
+        prefs = {"widgets": {"devices": True, "tasks": False, "events": True}, "refresh_seconds": 30}
+        self.assertEqual(self.call("POST", "/preferences", data=prefs)[1], prefs)
+        self.assertEqual(self.call("GET", "/preferences", key="c")[1]["refresh_seconds"], 0)
+        self.assertEqual(self.call("POST", "/preferences", data={"widgets": {"devices": True}, "refresh_seconds": 60})[0], 400)
+        _, device = self.call("POST", "/devices", data={"name": "edge", "address": "192.0.2.1", "kind": "router"})
+        _, rule = self.call("POST", "/automation_rules", data={"name": "critical", "severity": "critical", "operation": "ansible_check"})
+        self.assertEqual(self.call("POST", f"/automation_rules/{rule['id']}/disable", key="b", data={})[0], 404)
+        self.assertEqual(self.call("POST", f"/automation_rules/{rule['id']}/disable", data={})[1], {"enabled": False})
+        self.call("POST", "/events", data={"device_id": device["id"], "severity": "critical", "message": "down"})
+        self.assertEqual(self.call("GET", "/jobs")[1], [])
+        self.assertEqual(self.call("POST", f"/automation_rules/{rule['id']}/enable", data={})[1], {"enabled": True})
+        self.call("POST", "/events", data={"device_id": device["id"], "severity": "critical", "message": "down again"})
+        self.assertEqual(len(self.call("GET", "/jobs")[1]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
