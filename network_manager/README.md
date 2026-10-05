@@ -20,7 +20,25 @@ curl -X POST -H "Authorization: Bearer $NETWIZZARD_API_KEY" -H 'Content-Type: ap
   -d '{"name":"core-1","address":"192.0.2.10","kind":"router"}' http://127.0.0.1:8080/devices
 ```
 
-Available collections: `/devices`, `/groups`, `/links`, `/events`, `/jobs`, `/audit`. Assign a group with `POST /devices/{device_id}/groups/{group_id}`. Jobs accept `backup`, `config_review`, `patch_review`, and `remote_session`; approval is `POST /jobs/{id}/approve` by a different admin. **Approval records intent only. No SSH, RDP, SNMP, patch, backup, or configuration action is performed.**
+Available collections: `/devices`, `/groups`, `/links`, `/events`, `/jobs`, `/automation_rules`, `/audit`. Assign a group with `POST /devices/{device_id}/groups/{group_id}`. Approval is `POST /jobs/{id}/approve` by a different admin. Review-only jobs (`backup`, `config_review`, `patch_review`, `remote_session`) record intent and never execute device commands. The two Ansible operations require the separate opt-in worker described below.
+
+## Approved mass deployment and event triggers
+
+The Automation tab can queue `ansible_check` or `ansible_deploy` for every device in one group (up to 100 per request). An admin can create a severity rule, optionally scoped to a group. A matching event queues a job for its device. Every job starts in `pending_approval`; a **different** admin must approve it. The GUI shows status and allows approval. Only allowlisted Ansible operations can run; review-only jobs never execute.
+
+To run approved jobs, install `ansible-core` on a protected control node with SSH access to the managed hosts. Configure a dedicated SSH identity and strict host-key verification outside the repository. After setting `NETWIZZARD_DB` to the same protected database path used by the API, run:
+
+```sh
+NETWIZZARD_ANSIBLE_ENABLED=1 python3 worker.py once
+# Or keep a supervised worker running:
+NETWIZZARD_ANSIBLE_ENABLED=1 python3 worker.py loop
+```
+
+The worker starts disabled and processes one approved job at a time, honoring UTC `schedule_at` timestamps. Its only playbooks are `ansible/check.yml` (ping/facts) and `ansible/deploy.yml` (Debian baseline packages, serial one host per invocation). It uses `ansible-playbook` without a shell, strict host-key checking, a temporary single-host JSON inventory, and a 15-minute timeout. The console never accepts arbitrary playbook paths, SSH commands, or inventory variables. A result event records success or failure without storing command output or secrets.
+
+The API key from `bootstrap` belongs to one administrator. To use two-person approval, create a second admin principal with a distinct hashed key in the database or add a secure enrollment flow before production use. Do not share the bootstrap key between administrators.
+
+This does not provide production-grade mass rollout yet: add durable worker leases and restart recovery, retries with bounds, maintenance windows, canary groups, rollback, vault-backed credentials, signed playbook releases, and device-specific modules. The event source is currently an authenticated API caller, not a live telemetry collector. Verify host ownership and authorization before enabling the worker against any real device.
 
 Every record carries a tenant ID. Read and write queries scope by the authenticated principal's tenant. Roles are `viewer`, `operator`, and `admin`; this initial CLI creates an admin only. The database schema anticipates richer user management, but secure principal enrollment and key rotation need implementation before production use.
 
@@ -30,7 +48,7 @@ Every record carries a tenant ID. Read and write queries scope by the authentica
 | --- | --- | --- |
 | Multi-tenant device inventory, upload/manual entry, groups | Tenant-scoped API and group assignment | CSV import with validation, UI, ownership and credential vault |
 | Topology and event monitoring | Stored links and events | Discovery agents, polling, event correlation and notifications |
-| Scheduling, remote configuration, deployment, patches | Approval queue only | Protocol adapters, policy engine, dry run, rollback and change windows |
+| Scheduling and mass deployment | Group queue, severity triggers, separate-admin approval, opt-in Ansible checks/Debian baseline | Durable worker, canary rollout, rollback and device-specific modules |
 | Direct connections and remote desktop | Approval queue only | Brokered sessions with MFA, recording and expiring grants |
 | LDAP and network authentication | Not implemented | LDAP/OIDC provider, group mapping and least-privilege roles |
 | Server/device/node health | Not implemented | Agent telemetry, SNMPv3 and metrics retention |
