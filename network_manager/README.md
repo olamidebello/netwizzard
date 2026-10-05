@@ -24,11 +24,13 @@ Available collections: `/devices`, `/groups`, `/links`, `/events`, `/jobs`, `/au
 
 ## Inventory, configuration and access controls
 
-- The Devices tab accepts manual entries and a CSV file with `name,address,kind,notes` headers (up to 500 rows and 400 KB). Quoted fields are supported. The backend validates the whole batch and inserts it atomically; duplicate names reject the upload. Search filters the visible inventory.
+- The Devices tab accepts manual entries and a CSV file with `name,address,kind,notes` headers (up to 5,000 rows and 2 MB). Quoted fields are supported. The backend validates the whole batch and inserts it atomically; duplicate names reject the upload. Search filters the visible inventory. Devices can be edited after import.
 - Device groups can be created, renamed, assigned and unassigned in the console. All actions are tenant scoped.
 - A manual configuration draft can be saved for a device and loaded later as a new revision. Draft text is stored in SQLite and **is not pushed to the device**. Do not paste credentials or private keys into drafts.
 - Tenant admins can create users as admin, operator or viewer and revoke access. A generated API key is returned once; only its SHA-256 hash is stored. Viewers can read; operators can manage inventory and request jobs; admins can manage users, scripts, rules and schedules. The current admin cannot revoke their own account. Key rotation, MFA, OIDC/LDAP and session management remain production work.
 - Admins can upload `.yml`, `.yaml` or `.sh` files (up to 128 KB) to the script library. Files receive a SHA-256 digest and can be reviewed in the console. **Uploaded scripts are never handed to the Ansible worker and cannot execute.** Only the two checked-in playbooks can run.
+
+The Dashboard tab shows recent devices, tasks and events. Each user can hide widgets and select a manual, 30-second or one-minute refresh interval; display preferences are stored in that browser, while the API key remains in memory only. Devices, groups, events and jobs have export buttons that fetch tenant-scoped rows from `/exports/{collection}` and download CSV. Spreadsheet formula-like values are prefixed on export to reduce CSV injection risk. Events can be acknowledged or resolved; pending or approved jobs can be cancelled before a worker claims them. The web navigation links Dashboard, Devices, Topology, Events, Change requests, Automation and Users & scripts to these API operations.
 
 ## Approved mass deployment and event triggers
 
