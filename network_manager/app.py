@@ -27,6 +27,7 @@ SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS platform_admins(id INTEGER PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS platform_audit(id INTEGER PRIMARY KEY, platform_admin_id INTEGER NOT NULL REFERENCES platform_admins(id), action TEXT NOT NULL, target TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS principals(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')), key_hash TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS groups(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, UNIQUE(tenant_id,name));
 CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, address TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unknown', notes TEXT NOT NULL DEFAULT '', UNIQUE(tenant_id,name));
@@ -204,14 +205,31 @@ class Handler(BaseHTTPRequestHandler):
                     token = secrets.token_urlsafe(32)
                     tenant_id = db.execute("INSERT INTO tenants(name) VALUES(?)", (name,)).lastrowid
                     admin_id = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)", (tenant_id,admin_name,"admin",hashlib.sha256(token.encode()).hexdigest())).lastrowid
+                    db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],"create_tenant",str(tenant_id),now()))
                     return self.send(201, {"tenant_id":tenant_id,"admin_id":admin_id,"api_key":token})
+                if path == ["platform", "audit"] and method == "GET":
+                    return self.send(200, [dict(row) for row in db.execute("SELECT id,action,target,created_at FROM platform_audit ORDER BY id DESC LIMIT 200")])
+                if len(path)==4 and path[1]=="tenants" and path[3]=="admins" and method=="GET":
+                    tenant_id = int(path[2])
+                    if not db.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone(): return self.send(404, {"error": "Tenant not found"})
+                    return self.send(200, [dict(row) for row in db.execute("SELECT id,name,active FROM principals WHERE tenant_id=? AND role='admin' ORDER BY id", (tenant_id,))])
                 if len(path)==4 and path[1]=="tenants" and path[3]=="admins" and method=="POST":
                     tenant_id = int(path[2]); name = str(self.body()["name"]).strip()
                     if not name or len(name)>100: return self.send(400, {"error": "Invalid admin name"})
                     if not db.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone(): return self.send(404, {"error": "Tenant not found"})
                     token = secrets.token_urlsafe(32)
                     admin_id = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)", (tenant_id,name,"admin",hashlib.sha256(token.encode()).hexdigest())).lastrowid
+                    db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],"create_tenant_admin",f"{tenant_id}:{admin_id}",now()))
                     return self.send(201, {"admin_id":admin_id,"api_key":token})
+                if len(path)==6 and path[1]=="tenants" and path[3]=="admins" and path[5]=="revoke" and method=="POST":
+                    tenant_id, admin_id = int(path[2]), int(path[4])
+                    db.execute("BEGIN IMMEDIATE")
+                    active = db.execute("SELECT count(*) FROM principals WHERE tenant_id=? AND role='admin' AND active=1", (tenant_id,)).fetchone()[0]
+                    if active <= 1: return self.send(409, {"error": "Cannot revoke the last active tenant admin"})
+                    changed = db.execute("UPDATE principals SET active=0 WHERE id=? AND tenant_id=? AND role='admin' AND active=1", (admin_id,tenant_id))
+                    if not changed.rowcount: return self.send(404, {"error": "Active tenant admin not found"})
+                    db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],"revoke_tenant_admin",f"{tenant_id}:{admin_id}",now()))
+                    return self.send(200, {"active":False})
                 return self.send(404, {"error": "Not found"})
             if path == ["agent", "report"] and method == "POST":
                 token = self.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -290,6 +308,7 @@ class Handler(BaseHTTPRequestHandler):
                     "memberships": ("device_id", "group_id"),
                     "events": ("id", "device_id", "severity", "message", "status", "created_at"),
                     "jobs": ("id", "device_id", "operation", "schedule_at", "state", "created_at"),
+                    "telemetry": ("id", "device_id", "agent_id", "status", "cpu_percent", "memory_percent", "created_at"),
                 }.get(path[1])
                 if not columns:
                     return self.send(404, {"error": "Unknown export"})
@@ -381,6 +400,8 @@ class Handler(BaseHTTPRequestHandler):
                 if role == "viewer":
                     return self.send(403, {"error": "Forbidden"})
                 data = self.body()
+                if role != "admin" and ("owner_id" in data or "credential_ref" in data):
+                    return self.send(403, {"error": "Admin required for ownership and credential references"})
                 fields = {field: str(data[field]).strip() for field in ("name", "address", "kind", "notes") if field in data}
                 if any(not value for field, value in fields.items() if field != "notes") or any(len(value) > 1000 for value in fields.values()):
                     return self.send(400, {"error": "Invalid device update"})
@@ -489,6 +510,8 @@ class Handler(BaseHTTPRequestHandler):
                     name, address, kind = (str(data[k]).strip() for k in ("name", "address", "kind"))
                     if not all((name, address, kind)):
                         raise ValueError("Device fields cannot be empty")
+                    if role != "admin" and (data.get("owner_id") or data.get("credential_ref")):
+                        return self.send(403, {"error": "Admin required for ownership and credential references"})
                     owner, ref = validate_device_metadata(db, tenant, data)
                     cur = db.execute("INSERT INTO devices(tenant_id,name,address,kind,notes,owner_id,credential_ref) VALUES(?,?,?,?,?,?,?)",
                                      (tenant, name, address, kind, str(data.get("notes", "")), owner, ref))
