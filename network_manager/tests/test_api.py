@@ -54,7 +54,7 @@ class ApiTests(unittest.TestCase):
 
     def test_console_identity_is_tenant_scoped(self):
         self.assertEqual(self.call("GET", "/me", key="a"),
-                         (200, {"tenant": "A", "name": "admin", "role": "admin"}))
+                         (200, {"id": 1, "tenant": "A", "name": "admin", "role": "admin"}))
         self.assertEqual(self.call("GET", "/me", key="b")[1]["tenant"], "B")
         self.assertEqual(self.call("GET", "/me", key="invalid")[0], 401)
 
@@ -131,6 +131,36 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/schedules/{created['id']}/pause", key="b", data={})[0], 404)
         self.assertEqual(self.call("POST", f"/schedules/{created['id']}/pause", data={})[1], {"enabled": False})
         self.assertFalse(self.call("GET", "/schedules")[1][0]["enabled"])
+
+    def test_device_upload_configuration_and_group_management(self):
+        rows = [{"name": "a", "address": "192.0.2.1", "kind": "router"},
+                {"name": "b", "address": "192.0.2.2", "kind": "switch"}]
+        self.assertEqual(self.call("POST", "/devices/import", data={"rows": rows})[1]["imported"], 2)
+        self.assertEqual(self.call("POST", "/devices/import", key="b", data={"rows": rows})[0], 201)
+        devices = self.call("GET", "/devices")[1]
+        _, group = self.call("POST", "/groups", data={"name": "edge"})
+        self.assertEqual(self.call("POST", f"/groups/{group['id']}/rename", data={"name": "core"})[1]["name"], "core")
+        device = devices[0]["id"]
+        self.call("POST", f"/devices/{device}/groups/{group['id']}", data={})
+        self.assertEqual(len(self.call("GET", "/memberships")[1]), 1)
+        self.assertEqual(self.call("POST", f"/devices/{device}/groups/{group['id']}/remove", data={})[1], {"assigned": False})
+        status, draft = self.call("POST", f"/devices/{device}/config", data={"content": "hostname b"})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.call("GET", f"/config_drafts/{draft['id']}")[1]["content"], "hostname b")
+        self.assertEqual(self.call("GET", "/config_drafts", key="b")[1], [])
+
+    def test_user_control_and_script_storage(self):
+        status, created = self.call("POST", "/users", data={"name": "tech", "role": "operator"})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.call("GET", "/me", key=created["api_key"])[1]["role"], "operator")
+        self.assertEqual(self.call("GET", "/users", key=created["api_key"])[0], 403)
+        status, script = self.call("POST", "/scripts", data={"name": "baseline.yml", "content": "---\n- hosts: all\n"})
+        self.assertEqual(status, 201)
+        self.assertEqual(script["status"], "stored_not_executable")
+        self.assertEqual(self.call("GET", "/scripts", key="b")[1], [])
+        self.assertEqual(self.call("POST", "/scripts", key=created["api_key"], data={"name": "bad.sh", "content": "echo hi"})[0], 403)
+        self.assertEqual(self.call("POST", f"/users/{created['id']}/revoke", data={})[1], {"active": False})
+        self.assertEqual(self.call("GET", "/me", key=created["api_key"])[0], 401)
 
 
 if __name__ == "__main__":
