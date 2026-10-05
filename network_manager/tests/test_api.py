@@ -162,6 +162,21 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/users/{created['id']}/revoke", data={})[1], {"active": False})
         self.assertEqual(self.call("GET", "/me", key=created["api_key"])[0], 401)
 
+    def test_export_and_management_actions_stay_in_tenant(self):
+        _, device = self.call("POST", "/devices", data={"name": "edge", "address": "192.0.2.1", "kind": "router"})
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", data={"name": "edge-new"})[1], {"updated": True})
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", key="b", data={"name": "other"})[0], 404)
+        exported = self.call("GET", "/exports/devices")[1]
+        self.assertEqual(exported["rows"][0][1], "edge-new")
+        self.assertEqual(self.call("GET", "/exports/devices", key="b")[1]["rows"], [])
+        _, event = self.call("POST", "/events", data={"device_id": device["id"], "severity": "warning", "message": "slow"})
+        self.assertEqual(self.call("POST", f"/events/{event['id']}/acknowledge", data={})[1]["status"], "acknowledged")
+        self.assertEqual(self.call("POST", f"/events/{event['id']}/resolve", data={})[1]["status"], "resolved")
+        self.assertEqual(self.call("POST", f"/events/{event['id']}/resolve", key="b", data={})[0], 409)
+        _, job = self.call("POST", "/jobs", data={"device_id": device["id"], "operation": "config_review"})
+        self.assertEqual(self.call("POST", f"/jobs/{job['id']}/cancel", data={})[1]["state"], "cancelled")
+        self.assertEqual(self.call("POST", f"/jobs/{job['id']}/approve", key="c", data={})[0], 409)
+
 
 if __name__ == "__main__":
     unittest.main()
