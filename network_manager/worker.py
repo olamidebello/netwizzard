@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import app
@@ -60,10 +61,36 @@ def claim_one(db):
     return row
 
 
+def enqueue_due(db, current=None):
+    """Atomically enqueue one batch per due schedule; missed intervals do not backfill."""
+    current = current or datetime.now(timezone.utc)
+    stamp = current.isoformat()
+    db.execute("BEGIN IMMEDIATE")
+    due = db.execute("SELECT * FROM schedules WHERE enabled=1 AND next_run_at<=? ORDER BY next_run_at,id LIMIT 25", (stamp,)).fetchall()
+    queued = 0
+    for item in due:
+        ids = [row[0] for row in db.execute("SELECT device_id FROM memberships WHERE tenant_id=? AND group_id=? ORDER BY device_id LIMIT 101",
+                                           (item["tenant_id"], item["group_id"]))]
+        if len(ids) > 100:
+            db.execute("UPDATE schedules SET enabled=0 WHERE id=?", (item["id"],))
+            continue
+        for device in ids:
+            app.queue_job(db, item["tenant_id"], device, item["operation"], item["created_by"])
+        db.execute("INSERT INTO schedule_runs(tenant_id,schedule_id,due_at,created_at,job_count) VALUES(?,?,?,?,?)",
+                   (item["tenant_id"], item["id"], item["next_run_at"], stamp, len(ids)))
+        next_at = current + timedelta(seconds=item["interval_seconds"])
+        db.execute("UPDATE schedules SET next_run_at=?,last_run_at=? WHERE id=?",
+                   (next_at.isoformat(), stamp, item["id"]))
+        queued += len(ids)
+    db.commit()
+    return queued
+
+
 def run_once(executor=run_job):
     if os.environ.get("NETWIZZARD_ANSIBLE_ENABLED") != "1":
         raise RuntimeError("Set NETWIZZARD_ANSIBLE_ENABLED=1 on the protected worker host")
     with app.connect() as db:
+        enqueue_due(db)
         job = claim_one(db)
         if not job:
             return False
