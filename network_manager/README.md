@@ -36,6 +36,12 @@ NETWIZZARD_ANSIBLE_ENABLED=1 python3 worker.py loop
 
 The worker starts disabled and processes one approved job at a time, honoring UTC `schedule_at` timestamps. Its only playbooks are `ansible/check.yml` (ping/facts) and `ansible/deploy.yml` (Debian baseline packages, serial one host per invocation). It uses `ansible-playbook` without a shell, strict host-key checking, a temporary single-host JSON inventory, and a 15-minute timeout. The console never accepts arbitrary playbook paths, SSH commands, or inventory variables. A result event records success or failure without storing command output or secrets.
 
+### Recurring scheduler
+
+In the Automation tab, an admin can create a schedule for one device group with a first run time and a repeat interval from five minutes to 30 days. The mobile/web console lists each schedule's next run and offers Pause and Resume. The API exposes `GET/POST /schedules`, `POST /schedules/{id}/pause`, `POST /schedules/{id}/resume`, and read-only `GET /schedule_runs`. Times sent to the API must include a UTC offset; the console converts the user's local selection to UTC.
+
+Each worker cycle atomically processes up to 25 due schedules, queues up to 100 jobs per group, and records one run for each due time. It moves the next run forward from the current time, so an outage does not flood devices with missed intervals. If a group exceeds 100 members, that schedule is paused. An empty group records a zero-job run. Every queued job still needs approval by an admin other than the schedule creator; schedules do not grant standing permission to execute. The worker must remain running under a process supervisor for recurring schedules to fire.
+
 The API key from `bootstrap` belongs to one administrator. To use two-person approval, create a second admin principal with a distinct hashed key in the database or add a secure enrollment flow before production use. Do not share the bootstrap key between administrators.
 
 This does not provide production-grade mass rollout yet: add durable worker leases and restart recovery, retries with bounds, maintenance windows, canary groups, rollback, vault-backed credentials, signed playbook releases, and device-specific modules. The event source is currently an authenticated API caller, not a live telemetry collector. Verify host ownership and authorization before enabling the worker against any real device.
@@ -48,7 +54,7 @@ Every record carries a tenant ID. Read and write queries scope by the authentica
 | --- | --- | --- |
 | Multi-tenant device inventory, upload/manual entry, groups | Tenant-scoped API and group assignment | CSV import with validation, UI, ownership and credential vault |
 | Topology and event monitoring | Stored links and events | Discovery agents, polling, event correlation and notifications |
-| Scheduling and mass deployment | Group queue, severity triggers, separate-admin approval, opt-in Ansible checks/Debian baseline | Durable worker, canary rollout, rollback and device-specific modules |
+| Scheduling and mass deployment | Recurring group scheduler, pause/resume, severity triggers, separate-admin approval, opt-in Ansible checks/Debian baseline | Durable worker, canary rollout, rollback and device-specific modules |
 | Direct connections and remote desktop | Approval queue only | Brokered sessions with MFA, recording and expiring grants |
 | LDAP and network authentication | Not implemented | LDAP/OIDC provider, group mapping and least-privilege roles |
 | Server/device/node health | Not implemented | Agent telemetry, SNMPv3 and metrics retention |
