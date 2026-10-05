@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT N
 CREATE TABLE IF NOT EXISTS automation_rules(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, severity TEXT NOT NULL CHECK(severity IN ('info','warning','critical')), operation TEXT NOT NULL CHECK(operation IN ('ansible_check','ansible_deploy')), group_id INTEGER REFERENCES groups(id), created_by INTEGER NOT NULL REFERENCES principals(id), enabled INTEGER NOT NULL DEFAULT 1, UNIQUE(tenant_id,name));
 CREATE TABLE IF NOT EXISTS schedules(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, group_id INTEGER NOT NULL REFERENCES groups(id), operation TEXT NOT NULL CHECK(operation IN ('ansible_check','ansible_deploy')), interval_seconds INTEGER NOT NULL CHECK(interval_seconds BETWEEN 300 AND 2592000), next_run_at TEXT NOT NULL, last_run_at TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_by INTEGER NOT NULL REFERENCES principals(id), UNIQUE(tenant_id,name));
 CREATE TABLE IF NOT EXISTS schedule_runs(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, schedule_id INTEGER NOT NULL REFERENCES schedules(id), due_at TEXT NOT NULL, created_at TEXT NOT NULL, job_count INTEGER NOT NULL, UNIQUE(schedule_id,due_at));
+CREATE TABLE IF NOT EXISTS config_drafts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), content TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stored', created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
 """
 
 
@@ -44,6 +46,8 @@ def connect():
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA)
+    if "active" not in [row[1] for row in db.execute("PRAGMA table_info(principals)")]:
+        db.execute("ALTER TABLE principals ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
     return db
 
 
@@ -132,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         digest = hashlib.sha256(key.encode()).hexdigest()
         # Compare fixed-size hashes rather than raw tokens.
-        for row in db.execute("SELECT * FROM principals"):
+        for row in db.execute("SELECT * FROM principals WHERE active=1"):
             if hmac.compare_digest(row["key_hash"], digest):
                 return row
         return None
@@ -153,12 +157,98 @@ class Handler(BaseHTTPRequestHandler):
             role = user["role"]
             if path == ["me"] and method == "GET":
                 name = db.execute("SELECT name FROM tenants WHERE id=?", (tenant,)).fetchone()[0]
-                return self.send(200, {"tenant": name, "name": user["name"], "role": role})
+                return self.send(200, {"id": user["id"], "tenant": name, "name": user["name"], "role": role})
             resource = path[0]
-            if resource not in ("devices", "groups", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs"):
+            if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts"):
                 return self.send(404, {"error": "Not found"})
+            if method == "GET" and path == ["users"]:
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,name,role,active FROM principals WHERE tenant_id=? ORDER BY id", (tenant,))])
+            if method == "POST" and path == ["users"]:
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                data = self.body()
+                name, new_role = str(data["name"]).strip(), str(data["role"])
+                if not name or len(name) > 100 or new_role not in ("admin", "operator", "viewer"):
+                    return self.send(400, {"error": "Invalid user name or role"})
+                token = secrets.token_urlsafe(32)
+                cur = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)",
+                                 (tenant, name, new_role, hashlib.sha256(token.encode()).hexdigest()))
+                self.audit(db, user, "create_user", str(cur.lastrowid))
+                return self.send(201, {"id": cur.lastrowid, "api_key": token})
+            if method == "POST" and resource == "users" and len(path) == 3 and path[2] == "revoke":
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                target = int(path[1])
+                if target == user["id"]:
+                    return self.send(409, {"error": "Cannot revoke current account"})
+                result = db.execute("UPDATE principals SET active=0 WHERE id=? AND tenant_id=?", (target, tenant))
+                if result.rowcount == 0:
+                    return self.send(404, {"error": "User not found"})
+                self.audit(db, user, "revoke_user", str(target))
+                return self.send(200, {"active": False})
+            if method == "POST" and path == ["devices", "import"]:
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                rows = self.body().get("rows")
+                if not isinstance(rows, list) or not 1 <= len(rows) <= 500:
+                    return self.send(400, {"error": "Provide 1 to 500 device rows"})
+                cleaned = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        return self.send(400, {"error": "Invalid row"})
+                    name, address, kind = (str(row.get(field, "")).strip() for field in ("name", "address", "kind"))
+                    if not all((name, address, kind)) or max(map(len, (name, address, kind))) > 255:
+                        return self.send(400, {"error": "Each row needs name, address and kind, at most 255 characters"})
+                    cleaned.append((tenant, name, address, kind, str(row.get("notes", ""))[:1000]))
+                if len({item[1] for item in cleaned}) != len(cleaned):
+                    return self.send(400, {"error": "Duplicate names in upload"})
+                db.executemany("INSERT INTO devices(tenant_id,name,address,kind,notes) VALUES(?,?,?,?,?)", cleaned)
+                self.audit(db, user, "import_devices", str(len(cleaned)))
+                return self.send(201, {"imported": len(cleaned)})
+            if method == "POST" and resource == "devices" and len(path) == 3 and path[2] == "config":
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                device_id = int(path[1])
+                if not db.execute("SELECT 1 FROM devices WHERE id=? AND tenant_id=?", (device_id, tenant)).fetchone():
+                    return self.send(404, {"error": "Device not found"})
+                content = self.body().get("content")
+                if not isinstance(content, str) or not content.strip() or len(content.encode()) > 65536:
+                    return self.send(400, {"error": "Configuration draft must be 1 to 65536 bytes"})
+                cur = db.execute("INSERT INTO config_drafts(tenant_id,device_id,content,created_by,created_at) VALUES(?,?,?,?,?)",
+                                 (tenant, device_id, content, user["id"], now()))
+                self.audit(db, user, "create_config_draft", str(cur.lastrowid))
+                return self.send(201, {"id": cur.lastrowid, "state": "draft_only"})
+            if method == "GET" and resource == "config_drafts" and len(path) == 1:
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,device_id,created_at FROM config_drafts WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))])
+            if method == "GET" and resource == "config_drafts" and len(path) == 2:
+                row = db.execute("SELECT id,device_id,content,created_at FROM config_drafts WHERE tenant_id=? AND id=?", (tenant, int(path[1]))).fetchone()
+                return self.send(200, dict(row)) if row else self.send(404, {"error": "Draft not found"})
+            if method == "GET" and resource == "scripts" and len(path) == 1:
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,name,sha256,status,created_at FROM scripts WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))])
+            if method == "GET" and resource == "scripts" and len(path) == 2:
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                row = db.execute("SELECT id,name,content,sha256,status,created_at FROM scripts WHERE tenant_id=? AND id=?", (tenant, int(path[1]))).fetchone()
+                return self.send(200, dict(row)) if row else self.send(404, {"error": "Script not found"})
+            if method == "POST" and path == ["scripts"]:
+                if role != "admin":
+                    return self.send(403, {"error": "Admin required"})
+                data = self.body()
+                name, content = data.get("name"), data.get("content")
+                if not isinstance(name, str) or not name.lower().endswith((".yml", ".yaml", ".sh")) or "/" in name or "\\" in name or len(name) > 120:
+                    return self.send(400, {"error": "Use a .yml, .yaml or .sh filename without a path"})
+                if not isinstance(content, str) or not content.strip() or len(content.encode()) > 131072:
+                    return self.send(400, {"error": "Script must be 1 to 131072 bytes"})
+                digest = hashlib.sha256(content.encode()).hexdigest()
+                cur = db.execute("INSERT INTO scripts(tenant_id,name,content,sha256,created_by,created_at) VALUES(?,?,?,?,?,?)",
+                                 (tenant, name, content, digest, user["id"], now()))
+                self.audit(db, user, "store_script", str(cur.lastrowid))
+                return self.send(201, {"id": cur.lastrowid, "sha256": digest, "status": "stored_not_executable"})
             if method == "GET" and len(path) == 1 and resource != "deployments":
-                rows = db.execute(f"SELECT * FROM {resource} WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))
+                order = "device_id DESC,group_id DESC" if resource == "memberships" else "id DESC"
+                rows = db.execute(f"SELECT * FROM {resource} WHERE tenant_id=? ORDER BY {order} LIMIT 500", (tenant,))
                 result = [dict(row) for row in rows]
                 if resource == "jobs":
                     for item in result:
@@ -204,6 +294,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.audit(db, user, "create_deployment", f"{operation}:{len(created)}")
                 return self.send(201, {"job_ids": created, "state": "pending_approval"})
             if method == "POST" and len(path) == 1:
+                if resource not in ("devices", "groups", "links", "events", "jobs", "automation_rules", "schedules"):
+                    return self.send(404, {"error": "Not found"})
                 if role == "viewer" or resource in ("audit", "schedule_runs") or (resource in ("automation_rules", "schedules") and role != "admin"):
                     return self.send(403, {"error": "Forbidden"})
                 data = self.body()
@@ -260,6 +352,17 @@ class Handler(BaseHTTPRequestHandler):
                                      (tenant, str(data["name"]), group_id, data["operation"], interval, start, user["id"]))
                 self.audit(db, user, "create_" + resource, str(cur.lastrowid))
                 return self.send(201, {"id": cur.lastrowid})
+            if method == "POST" and resource == "groups" and len(path) == 3 and path[2] == "rename":
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                name = str(self.body().get("name", "")).strip()
+                if not name or len(name) > 100:
+                    return self.send(400, {"error": "Invalid group name"})
+                result = db.execute("UPDATE groups SET name=? WHERE id=? AND tenant_id=?", (name, int(path[1]), tenant))
+                if not result.rowcount:
+                    return self.send(404, {"error": "Group not found"})
+                self.audit(db, user, "rename_group", path[1])
+                return self.send(200, {"name": name})
             if method == "POST" and resource == "devices" and len(path) == 4 and path[2] == "groups":
                 if role == "viewer":
                     return self.send(403, {"error": "Forbidden"})
@@ -269,6 +372,15 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute("INSERT OR IGNORE INTO memberships VALUES(?,?,?)", (tenant, device, group))
                 self.audit(db, user, "assign_group", f"{device}:{group}")
                 return self.send(200, {"assigned": True})
+            if method == "POST" and resource == "devices" and len(path) == 5 and path[2] == "groups" and path[4] == "remove":
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                device, group = int(path[1]), int(path[3])
+                result = db.execute("DELETE FROM memberships WHERE tenant_id=? AND device_id=? AND group_id=?", (tenant, device, group))
+                if not result.rowcount:
+                    return self.send(404, {"error": "Membership not found"})
+                self.audit(db, user, "remove_group", f"{device}:{group}")
+                return self.send(200, {"assigned": False})
             if method == "POST" and resource == "jobs" and len(path) == 3 and path[2] == "approve":
                 if role != "admin":
                     return self.send(403, {"error": "Admin required"})
