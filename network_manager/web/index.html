@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102b39">
+  <meta name="description" content="Netwizzard network management console">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <title>Netwizzard Console</title>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">N</span><span>netwizzard <small>console</small></span></div>
+    <div class="account"><span id="identity">Development console</span><button id="lock" class="text-button" hidden>Lock</button></div>
+  </header>
+  <main>
+    <section id="login" class="login-card">
+      <div class="eyebrow">Network operations</div>
+      <h1>Connect to your workspace</h1>
+      <p>Enter the API key from your tenant administrator. It stays in this browser tab's memory and is cleared when the tab closes.</p>
+      <form id="login-form">
+        <label>API key <input id="key" type="password" required autocomplete="off" spellcheck="false"></label>
+        <button type="submit">Open console</button>
+      </form>
+      <p class="small">This development console requires a trusted HTTPS reverse proxy before remote use.</p>
+    </section>
+    <section id="platform" class="panel" hidden>
+      <div class="hero"><div><div class="eyebrow">Platform administration</div><h1>Tenants</h1><p>Create tenant workspaces and issue one-time administrator keys.</p></div></div>
+      <div id="platform-notice" role="status"></div>
+      <div class="forms"><form id="tenant-form" class="form-card"><h2>Create tenant</h2><label>Tenant name<input name="name" required maxlength="100"></label><label>First admin name<input name="admin_name" required maxlength="100"></label><button>Create tenant</button></form><form id="tenant-admin-form" class="form-card"><h2>Add tenant admin</h2><label>Tenant<select name="tenant_id" required></select></label><label>Admin name<input name="name" required maxlength="100"></label><button>Add admin</button></form></div>
+      <div id="platform-key" class="form-card" hidden><h3>One-time tenant admin key</h3><code></code><button id="platform-key-hide" type="button" class="secondary">Hide key</button></div>
+      <div id="tenant-list" class="cards"></div>
+    </section>
+    <section id="workspace" hidden>
+      <div class="hero">
+        <div><div class="eyebrow" id="tenant">Tenant</div><h1>Network overview</h1><p>Inventory, topology, events and change requests in one place.</p></div>
+        <button id="refresh" class="secondary">Refresh data</button>
+      </div>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <div class="metrics" id="metrics"></div>
+      <nav class="tabs" aria-label="Console sections">
+        <button data-tab="dashboard" aria-current="page">Dashboard</button>
+        <button data-tab="devices">Devices</button>
+        <button data-tab="topology">Topology</button>
+        <button data-tab="events">Events</button>
+        <button data-tab="jobs">Change requests</button>
+        <button data-tab="automation">Automation</button>
+        <button data-tab="administration">Users & scripts</button>
+        <button data-tab="activity">Activity</button>
+      </nav>
+      <section id="dashboard" class="panel"><div class="section-heading"><div><h2>Your dashboard</h2><p>Choose the views you need. Preferences follow your account.</p></div><label>Refresh<select id="refresh-interval"><option value="0">Manual</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option></select></label></div>
+        <div class="widget-controls"><label><input type="checkbox" data-widget="devices" checked> Devices</label><label><input type="checkbox" data-widget="tasks" checked> Tasks</label><label><input type="checkbox" data-widget="events" checked> Events</label></div>
+        <div class="dashboard-grid"><div id="widget-devices" class="form-card"><h3>Devices</h3><div class="cards"></div></div><div id="widget-tasks" class="form-card"><h3>Tasks</h3><div class="cards"></div></div><div id="widget-events" class="form-card"><h3>Events</h3><div class="cards"></div></div></div>
+      </section>
+      <section id="devices" class="panel" hidden>
+        <div class="section-heading"><div><h2>Devices</h2><p>Tenant inventory and device groups</p></div><div class="toolbar"><input id="search" type="search" placeholder="Search devices" aria-label="Search devices"><button type="button" class="secondary export" data-export="devices">Export devices</button><button type="button" class="secondary export" data-export="groups">Export groups</button></div></div>
+        <div class="split"><div><div id="device-list" class="cards"></div></div><div class="forms">
+          <form id="device-form" class="form-card"><h3>Add device</h3><label>Name<input name="name" required maxlength="100"></label><label>Address<input name="address" required maxlength="255" placeholder="IP or hostname"></label><label>Type<input name="kind" required maxlength="80" placeholder="Router, switch, server..."></label><label>Owner<select name="owner_id"><option value="">Unassigned</option></select></label><label>Credential reference<input name="credential_ref" maxlength="255" placeholder="vault://path/to/secret"></label><p class="small">A reference only; this console cannot retrieve secrets or open SSH sessions.</p><label>Notes<textarea name="notes" rows="2"></textarea></label><button>Add device</button></form>
+          <form id="group-form" class="form-card"><h3>Create group</h3><label>Group name<input name="name" required maxlength="100"></label><button class="secondary">Create group</button></form>
+          <form id="assign-form" class="form-card"><h3>Assign group</h3><label>Device<select name="device_id" required></select></label><label>Group<select name="group_id" required></select></label><button class="secondary">Assign</button></form>
+          <form id="upload-form" class="form-card"><h3>Mass import devices</h3><p class="small">CSV headers: name,address,kind,notes. Up to 5,000 rows per upload.</p><label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label><button class="secondary">Import devices</button></form>
+          <form id="config-form" class="form-card"><h3>Manual configuration draft</h3><label>Device<select name="device_id" required></select></label><label>Configuration text<textarea name="content" rows="5" required placeholder="Do not include passwords or private keys"></textarea></label><button class="secondary">Save draft</button></form>
+          <div class="form-card"><h3>Groups</h3><div id="group-list" class="cards"></div></div>
+          <div class="form-card"><h3>Configuration drafts</h3><div id="config-list" class="cards"></div></div>
+        </div></div>
+      </section>
+      <section id="topology" class="panel" hidden><div class="section-heading"><div><h2>Topology</h2><p>Documented connections between devices</p></div></div><div id="link-list" class="cards"></div><form id="link-form" class="form-card inline-form"><label>From<select name="source_id" required></select></label><label>To<select name="target_id" required></select></label><label>Label<input name="label" placeholder="Fiber, VPN, uplink..."></label><button>Add link</button></form></section>
+      <section id="events" class="panel" hidden><div class="section-heading"><div><h2>Events</h2><p>Recorded events; live polling is a future integration</p></div><button type="button" class="secondary export" data-export="events">Export events</button></div><div id="event-list" class="cards"></div><form id="event-form" class="form-card inline-form"><label>Device<select name="device_id" required></select></label><label>Severity<select name="severity"><option>info</option><option>warning</option><option>critical</option></select></label><label>Message<input name="message" required maxlength="500"></label><button>Record event</button></form></section>
+      <section id="jobs" class="panel" hidden><div class="section-heading"><div><h2>Change requests</h2><p>Review actions record intent only. Allowlisted Ansible jobs run only when the worker is explicitly enabled.</p></div><div class="toolbar"><button id="approve-selected" type="button" class="secondary">Approve selected</button><button type="button" class="secondary export" data-export="jobs">Export tasks</button></div></div><div id="job-list" class="cards"></div><form id="job-form" class="form-card inline-form"><label>Device<select name="device_id" required></select></label><label>Action<select name="operation"><option value="backup">Backup review</option><option value="config_review">Configuration review</option><option value="patch_review">Patch review</option><option value="remote_session">Remote session review</option></select></label><label>Scheduled for<input name="schedule_at" type="datetime-local"></label><button>Request approval</button></form></section>
+      <section id="automation" class="panel" hidden><div class="section-heading"><div><h2>Mass deployment</h2><p>Up to 100 devices per request. A different admin must approve each job before the opt-in Ansible worker runs it.</p></div></div>
+        <div class="forms automation-forms">
+          <form id="deployment-form" class="form-card"><h3>Request group deployment</h3><label>Device group<select name="group_id" required></select></label><label>Playbook<select name="operation"><option value="ansible_check">Connectivity and facts check</option><option value="ansible_deploy">Debian baseline</option></select></label><label>Run no earlier than<input name="schedule_at" type="datetime-local"></label><button>Queue group for approval</button></form>
+          <form id="rule-form" class="form-card"><h3>Create event trigger</h3><label>Rule name<input name="name" required maxlength="100"></label><label>Severity<select name="severity"><option>critical</option><option>warning</option><option>info</option></select></label><label>Device group<select name="group_id"><option value="">All devices</option></select></label><label>Playbook<select name="operation"><option value="ansible_check">Connectivity and facts check</option><option value="ansible_deploy">Debian baseline</option></select></label><button>Create rule</button></form>
+          <form id="schedule-form" class="form-card"><h3>Recurring schedule</h3><label>Schedule name<input name="name" required maxlength="100"></label><label>Device group<select name="group_id" required></select></label><label>Playbook<select name="operation"><option value="ansible_check">Connectivity and facts check</option><option value="ansible_deploy">Debian baseline</option></select></label><label>Repeat every<select name="interval_seconds"><option value="300">5 minutes</option><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">1 week</option></select></label><label>First run<input name="next_run_at" type="datetime-local" required></label><button>Create schedule</button></form>
+        </div><h3>Event trigger rules</h3><div id="rule-list" class="cards"></div>
+        <h3 class="subheading">Recurring schedules</h3><div id="schedule-list" class="cards"></div>
+      </section>
+      <section id="administration" class="panel" hidden><div class="section-heading"><div><h2>Users & scripts</h2><p>Tenant admins control access. Uploaded scripts are stored for review and cannot run.</p></div></div>
+        <div class="forms automation-forms">
+          <form id="user-form" class="form-card"><h3>Create user</h3><label>Name<input name="name" required maxlength="100"></label><label>Role<select name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label><button>Create user and key</button><p class="small">Copy the key immediately; it is shown once and never stored in the browser.</p></form>
+          <form id="script-form" class="form-card"><h3>Upload deployment script</h3><label>Script file<input name="file" type="file" accept=".yml,.yaml,.sh" required></label><button class="secondary">Store for review</button><p class="small">Scripts are inert uploads. The worker runs only the two built-in playbooks.</p></form>
+        </div>
+        <div id="one-time-key" class="form-card" hidden><h3>New user API key</h3><code id="generated-key"></code><button id="hide-key" type="button" class="secondary">Hide key</button></div>
+        <h3>Users</h3><div id="user-list" class="cards"></div><h3 class="subheading">Stored scripts</h3><div id="script-list" class="cards"></div><pre id="script-preview" hidden></pre>
+        <div class="form-card"><h3>Discovery agents</h3><p class="small">Agent keys are shown once. Reports create devices and telemetry through the API; no network scanner is bundled.</p><form id="agent-form"><label>Agent name<input name="name" required maxlength="100"></label><button>Create agent key</button></form><div id="agent-key" hidden><code></code><button id="hide-agent-key" type="button" class="secondary">Hide key</button></div><div id="agent-list" class="cards"></div></div>
+      </section>
+      <section id="activity" class="panel" hidden><div class="section-heading"><div><h2>Activity</h2><p>Recent tenant actions, schedule runs and approvals.</p></div><button id="activity-refresh" type="button" class="secondary">Refresh activity</button></div><div id="activity-list" class="cards"></div></section>
+    </section>
+  </main>
+  <footer>Netwizzard development console · No remote commands are run by this interface.</footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>

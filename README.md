@@ -2,6 +2,12 @@
 
 A Nigerian DID, PBX, contact-center, and softphone platform. This is a new repository; production switching and applications are not implemented yet.
 
+## Implemented network management module
+
+The [`network_manager/`](network_manager/) directory contains a tenant-scoped Python API and responsive web/mobile browser console. It supports isolated tenants with separate platform super-admin and tenant-admin controls, device inventory and ownership, groups, topology links, agent-reported discovery and telemetry, events, approved change requests, group deployment queues, recurring schedules, CSV import/export, configuration drafts, and a customizable dashboard. Device vault references are metadata only. The opt-in Ansible worker runs only fixed connectivity-check and Debian-baseline playbooks after a different administrator approves each job; expired worker claims need manual review. See the [network manager setup and user manual](network_manager/README.md) for GUI steps, API usage, limits, and tests.
+
+This code is on a draft branch and is not deployed to a server. Device credentials, HTTPS, secure administrator enrollment, vault integration, MFA, SSH brokering, canary rollout, rollback, native clients, and production safeguards remain prerequisites for real deployments. The telecom switch, DID purchasing, and softphone applications below are still planned.
+
 ## Proposed service boundaries
 
 - Kamailio: SIP edge, registration, routing, and protection.
