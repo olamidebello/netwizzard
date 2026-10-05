@@ -26,6 +26,13 @@
       </form>
       <p class="small">This development console requires a trusted HTTPS reverse proxy before remote use.</p>
     </section>
+    <section id="platform" class="panel" hidden>
+      <div class="hero"><div><div class="eyebrow">Platform administration</div><h1>Tenants</h1><p>Create tenant workspaces and issue one-time administrator keys.</p></div></div>
+      <div id="platform-notice" role="status"></div>
+      <div class="forms"><form id="tenant-form" class="form-card"><h2>Create tenant</h2><label>Tenant name<input name="name" required maxlength="100"></label><label>First admin name<input name="admin_name" required maxlength="100"></label><button>Create tenant</button></form><form id="tenant-admin-form" class="form-card"><h2>Add tenant admin</h2><label>Tenant<select name="tenant_id" required></select></label><label>Admin name<input name="name" required maxlength="100"></label><button>Add admin</button></form></div>
+      <div id="platform-key" class="form-card" hidden><h3>One-time tenant admin key</h3><code></code><button id="platform-key-hide" type="button" class="secondary">Hide key</button></div>
+      <div id="tenant-list" class="cards"></div>
+    </section>
     <section id="workspace" hidden>
       <div class="hero">
         <div><div class="eyebrow" id="tenant">Tenant</div><h1>Network overview</h1><p>Inventory, topology, events and change requests in one place.</p></div>
@@ -50,7 +57,7 @@
       <section id="devices" class="panel" hidden>
         <div class="section-heading"><div><h2>Devices</h2><p>Tenant inventory and device groups</p></div><div class="toolbar"><input id="search" type="search" placeholder="Search devices" aria-label="Search devices"><button type="button" class="secondary export" data-export="devices">Export devices</button><button type="button" class="secondary export" data-export="groups">Export groups</button></div></div>
         <div class="split"><div><div id="device-list" class="cards"></div></div><div class="forms">
-          <form id="device-form" class="form-card"><h3>Add device</h3><label>Name<input name="name" required maxlength="100"></label><label>Address<input name="address" required maxlength="255" placeholder="IP or hostname"></label><label>Type<input name="kind" required maxlength="80" placeholder="Router, switch, server..."></label><label>Notes<textarea name="notes" rows="2"></textarea></label><button>Add device</button></form>
+          <form id="device-form" class="form-card"><h3>Add device</h3><label>Name<input name="name" required maxlength="100"></label><label>Address<input name="address" required maxlength="255" placeholder="IP or hostname"></label><label>Type<input name="kind" required maxlength="80" placeholder="Router, switch, server..."></label><label>Owner<select name="owner_id"><option value="">Unassigned</option></select></label><label>Credential reference<input name="credential_ref" maxlength="255" placeholder="vault://path/to/secret"></label><p class="small">A reference only; this console cannot retrieve secrets or open SSH sessions.</p><label>Notes<textarea name="notes" rows="2"></textarea></label><button>Add device</button></form>
           <form id="group-form" class="form-card"><h3>Create group</h3><label>Group name<input name="name" required maxlength="100"></label><button class="secondary">Create group</button></form>
           <form id="assign-form" class="form-card"><h3>Assign group</h3><label>Device<select name="device_id" required></select></label><label>Group<select name="group_id" required></select></label><button class="secondary">Assign</button></form>
           <form id="upload-form" class="form-card"><h3>Mass import devices</h3><p class="small">CSV headers: name,address,kind,notes. Up to 5,000 rows per upload.</p><label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label><button class="secondary">Import devices</button></form>
@@ -77,6 +84,7 @@
         </div>
         <div id="one-time-key" class="form-card" hidden><h3>New user API key</h3><code id="generated-key"></code><button id="hide-key" type="button" class="secondary">Hide key</button></div>
         <h3>Users</h3><div id="user-list" class="cards"></div><h3 class="subheading">Stored scripts</h3><div id="script-list" class="cards"></div><pre id="script-preview" hidden></pre>
+        <div class="form-card"><h3>Discovery agents</h3><p class="small">Agent keys are shown once. Reports create devices and telemetry through the API; no network scanner is bundled.</p><form id="agent-form"><label>Agent name<input name="name" required maxlength="100"></label><button>Create agent key</button></form><div id="agent-key" hidden><code></code><button id="hide-agent-key" type="button" class="secondary">Hide key</button></div><div id="agent-list" class="cards"></div></div>
       </section>
       <section id="activity" class="panel" hidden><div class="section-heading"><div><h2>Activity</h2><p>Recent tenant actions, schedule runs and approvals.</p></div><button id="activity-refresh" type="button" class="secondary">Refresh activity</button></div><div id="activity-list" class="cards"></div></section>
     </section>
