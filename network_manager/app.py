@@ -1,6 +1,7 @@
 """Small, dependency-free management API. No device commands are executed."""
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -25,6 +26,7 @@ PORT = int(os.environ.get("NETWIZZARD_PORT", "8080"))
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS platform_admins(id INTEGER PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS principals(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')), key_hash TEXT NOT NULL UNIQUE);
 CREATE TABLE IF NOT EXISTS groups(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, UNIQUE(tenant_id,name));
 CREATE TABLE IF NOT EXISTS devices(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, address TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'unknown', notes TEXT NOT NULL DEFAULT '', UNIQUE(tenant_id,name));
@@ -39,6 +41,9 @@ CREATE TABLE IF NOT EXISTS schedule_runs(id INTEGER PRIMARY KEY, tenant_id INTEG
 CREATE TABLE IF NOT EXISTS config_drafts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), content TEXT NOT NULL, created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS scripts(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL, sha256 TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'stored', created_by INTEGER NOT NULL REFERENCES principals(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS preferences(principal_id INTEGER PRIMARY KEY REFERENCES principals(id), tenant_id INTEGER NOT NULL, widgets TEXT NOT NULL, refresh_seconds INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(tenant_id,name));
+CREATE TABLE IF NOT EXISTS telemetry(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), agent_id INTEGER NOT NULL REFERENCES agents(id), status TEXT NOT NULL CHECK(status IN ('up','down','degraded')), cpu_percent REAL, memory_percent REAL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS session_requests(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, device_id INTEGER NOT NULL REFERENCES devices(id), requested_by INTEGER NOT NULL REFERENCES principals(id), state TEXT NOT NULL DEFAULT 'awaiting_mfa', expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
 
@@ -51,6 +56,14 @@ def connect():
         db.execute("ALTER TABLE principals ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
     if "status" not in [row[1] for row in db.execute("PRAGMA table_info(events)")]:
         db.execute("ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
+    columns = [row[1] for row in db.execute("PRAGMA table_info(devices)")]
+    if "owner_id" not in columns:
+        db.execute("ALTER TABLE devices ADD COLUMN owner_id INTEGER REFERENCES principals(id)")
+    if "credential_ref" not in columns:
+        db.execute("ALTER TABLE devices ADD COLUMN credential_ref TEXT NOT NULL DEFAULT ''")
+    columns = [row[1] for row in db.execute("PRAGMA table_info(jobs)")]
+    if "lease_until" not in columns:
+        db.execute("ALTER TABLE jobs ADD COLUMN lease_until TEXT")
     return db
 
 
@@ -88,6 +101,18 @@ def trigger_rules(db, tenant, device, severity):
     return count
 
 
+def validate_device_metadata(db, tenant, data):
+    owner = data.get("owner_id") or None
+    if owner is not None:
+        owner = int(owner)
+        if not db.execute("SELECT 1 FROM principals WHERE id=? AND tenant_id=? AND active=1", (owner, tenant)).fetchone():
+            raise ValueError("Owner must be an active tenant user")
+    ref = str(data.get("credential_ref", "")).strip()
+    if ref and (not ref.startswith("vault://") or len(ref) > 255 or any(c.isspace() for c in ref)):
+        raise ValueError("Use a vault:// secret reference, never a credential value")
+    return owner, ref
+
+
 def bootstrap(name):
     key = secrets.token_urlsafe(32)
     with connect() as db:
@@ -95,6 +120,16 @@ def bootstrap(name):
         db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)",
                    (cur.lastrowid, "initial-admin", "admin", hashlib.sha256(key.encode()).hexdigest()))
     print("Save this one-time API key securely; it will not be shown again:")
+    print(key)
+
+
+def bootstrap_platform():
+    key = secrets.token_urlsafe(32)
+    with connect() as db:
+        if db.execute("SELECT 1 FROM platform_admins LIMIT 1").fetchone():
+            raise ValueError("Platform administrator already exists")
+        db.execute("INSERT INTO platform_admins(name,key_hash) VALUES(?,?)", ("platform-admin", hashlib.sha256(key.encode()).hexdigest()))
+    print("Save this one-time platform key securely; it will not be shown again:")
     print(key)
 
 
@@ -153,6 +188,64 @@ class Handler(BaseHTTPRequestHandler):
         if path == ["health"]:
             return self.send(200, {"status": "ok"})
         with connect() as db:
+            if path[0] == "platform":
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                digest = hashlib.sha256(token.encode()).hexdigest()
+                platform = db.execute("SELECT id,name FROM platform_admins WHERE key_hash=? AND active=1", (digest,)).fetchone() if token else None
+                if not platform: return self.send(401, {"error": "Platform administrator key required"})
+                if path == ["platform", "me"] and method == "GET":
+                    return self.send(200, {"id":platform["id"], "name":platform["name"], "role":"super_admin"})
+                if path == ["platform", "tenants"] and method == "GET":
+                    return self.send(200, [dict(row) for row in db.execute("SELECT tenants.id,tenants.name,count(principals.id) AS users FROM tenants LEFT JOIN principals ON principals.tenant_id=tenants.id GROUP BY tenants.id ORDER BY tenants.id")])
+                if path == ["platform", "tenants"] and method == "POST":
+                    data = self.body(); name = str(data["name"]).strip(); admin_name = str(data["admin_name"]).strip()
+                    if not name or len(name)>100 or not admin_name or len(admin_name)>100:
+                        return self.send(400, {"error": "Invalid tenant or administrator name"})
+                    token = secrets.token_urlsafe(32)
+                    tenant_id = db.execute("INSERT INTO tenants(name) VALUES(?)", (name,)).lastrowid
+                    admin_id = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)", (tenant_id,admin_name,"admin",hashlib.sha256(token.encode()).hexdigest())).lastrowid
+                    return self.send(201, {"tenant_id":tenant_id,"admin_id":admin_id,"api_key":token})
+                if len(path)==4 and path[1]=="tenants" and path[3]=="admins" and method=="POST":
+                    tenant_id = int(path[2]); name = str(self.body()["name"]).strip()
+                    if not name or len(name)>100: return self.send(400, {"error": "Invalid admin name"})
+                    if not db.execute("SELECT 1 FROM tenants WHERE id=?", (tenant_id,)).fetchone(): return self.send(404, {"error": "Tenant not found"})
+                    token = secrets.token_urlsafe(32)
+                    admin_id = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)", (tenant_id,name,"admin",hashlib.sha256(token.encode()).hexdigest())).lastrowid
+                    return self.send(201, {"admin_id":admin_id,"api_key":token})
+                return self.send(404, {"error": "Not found"})
+            if path == ["agent", "report"] and method == "POST":
+                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+                digest = hashlib.sha256(token.encode()).hexdigest()
+                agent = db.execute("SELECT * FROM agents WHERE key_hash=? AND active=1", (digest,)).fetchone() if token else None
+                if not agent:
+                    return self.send(401, {"error": "Active agent key required"})
+                data = self.body()
+                name, address, kind = (str(data[k]).strip() for k in ("name", "address", "kind"))
+                status = data.get("status")
+                if not name or len(name)>100 or not address or len(address)>255 or not kind or len(kind)>80 or status not in ("up", "down", "degraded"):
+                    return self.send(400, {"error": "Invalid device report"})
+                try:
+                    ipaddress.ip_address(address)
+                except ValueError:
+                    if not all(part and part.replace('-', '').isalnum() for part in address.split('.')):
+                        return self.send(400, {"error": "Invalid address"})
+                metrics = []
+                for field in ("cpu_percent", "memory_percent"):
+                    value = data.get(field)
+                    if value is not None and (type(value) not in (int, float) or not 0 <= value <= 100):
+                        return self.send(400, {"error": "Invalid metric"})
+                    metrics.append(value)
+                tenant = agent["tenant_id"]
+                existing = db.execute("SELECT id,status FROM devices WHERE tenant_id=? AND name=?", (tenant, name)).fetchone()
+                if existing:
+                    device = existing["id"]
+                    db.execute("UPDATE devices SET address=?,kind=?,status=? WHERE id=? AND tenant_id=?", (address,kind,status,device,tenant))
+                else:
+                    device = db.execute("INSERT INTO devices(tenant_id,name,address,kind,status) VALUES(?,?,?,?,?)", (tenant,name,address,kind,status)).lastrowid
+                db.execute("INSERT INTO telemetry(tenant_id,device_id,agent_id,status,cpu_percent,memory_percent,created_at) VALUES(?,?,?,?,?,?,?)", (tenant,device,agent["id"],status,*metrics,now()))
+                if status == "down" and (not existing or existing["status"] != "down"):
+                    db.execute("INSERT INTO events(tenant_id,device_id,severity,message,created_at) VALUES(?,?,?,?,?)", (tenant,device,"critical","Agent reported device down",now()))
+                return self.send(200, {"device_id": device, "status": status})
             user = self.principal(db)
             if not user:
                 return self.send(401, {"error": "Authentication required"})
@@ -204,8 +297,27 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [list(row) for row in db.execute(f"SELECT {fields} FROM {path[1]} WHERE tenant_id=? ORDER BY id DESC" if path[1] != "memberships" else
                                                        f"SELECT {fields} FROM memberships WHERE tenant_id=? ORDER BY device_id,group_id", (tenant,))]
                 return self.send(200, {"name": path[1], "columns": columns, "rows": rows})
-            if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts"):
+            if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts", "agents", "telemetry"):
                 return self.send(404, {"error": "Not found"})
+            if path == ["agents"] and method == "GET":
+                if role != "admin": return self.send(403, {"error": "Admin required"})
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,name,active,created_at FROM agents WHERE tenant_id=? ORDER BY id", (tenant,))])
+            if path == ["agents"] and method == "POST":
+                if role != "admin": return self.send(403, {"error": "Admin required"})
+                name = str(self.body()["name"]).strip()
+                if not name or len(name)>100: return self.send(400, {"error": "Invalid agent name"})
+                token = secrets.token_urlsafe(32)
+                cur = db.execute("INSERT INTO agents(tenant_id,name,key_hash,created_at) VALUES(?,?,?,?)", (tenant,name,hashlib.sha256(token.encode()).hexdigest(),now()))
+                self.audit(db,user,"create_agent",str(cur.lastrowid))
+                return self.send(201, {"id":cur.lastrowid,"agent_key":token})
+            if resource == "agents" and len(path)==3 and path[2]=="revoke" and method=="POST":
+                if role != "admin": return self.send(403, {"error": "Admin required"})
+                changed = db.execute("UPDATE agents SET active=0 WHERE tenant_id=? AND id=?", (tenant,int(path[1])))
+                if not changed.rowcount: return self.send(404, {"error": "Agent not found"})
+                self.audit(db,user,"revoke_agent",path[1])
+                return self.send(200, {"active":False})
+            if path == ["telemetry"] and method == "GET":
+                return self.send(200, [dict(row) for row in db.execute("SELECT id,device_id,agent_id,status,cpu_percent,memory_percent,created_at FROM telemetry WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))])
             if method == "GET" and path == ["users"]:
                 if role != "admin":
                     return self.send(403, {"error": "Admin required"})
@@ -270,7 +382,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(403, {"error": "Forbidden"})
                 data = self.body()
                 fields = {field: str(data[field]).strip() for field in ("name", "address", "kind", "notes") if field in data}
-                if not fields or any(not value for field, value in fields.items() if field != "notes") or any(len(value) > 1000 for value in fields.values()):
+                if any(not value for field, value in fields.items() if field != "notes") or any(len(value) > 1000 for value in fields.values()):
+                    return self.send(400, {"error": "Invalid device update"})
+                if "owner_id" in data or "credential_ref" in data:
+                    owner, ref = validate_device_metadata(db, tenant, data)
+                    if "owner_id" in data: fields["owner_id"] = owner
+                    if "credential_ref" in data: fields["credential_ref"] = ref
+                if not fields:
                     return self.send(400, {"error": "Invalid device update"})
                 assignments = ",".join(f"{field}=?" for field in fields)
                 result = db.execute(f"UPDATE devices SET {assignments} WHERE id=? AND tenant_id=?", [*fields.values(), int(path[1]), tenant])
@@ -371,8 +489,9 @@ class Handler(BaseHTTPRequestHandler):
                     name, address, kind = (str(data[k]).strip() for k in ("name", "address", "kind"))
                     if not all((name, address, kind)):
                         raise ValueError("Device fields cannot be empty")
-                    cur = db.execute("INSERT INTO devices(tenant_id,name,address,kind,notes) VALUES(?,?,?,?,?)",
-                                     (tenant, name, address, kind, str(data.get("notes", ""))))
+                    owner, ref = validate_device_metadata(db, tenant, data)
+                    cur = db.execute("INSERT INTO devices(tenant_id,name,address,kind,notes,owner_id,credential_ref) VALUES(?,?,?,?,?,?,?)",
+                                     (tenant, name, address, kind, str(data.get("notes", "")), owner, ref))
                 elif resource == "groups":
                     cur = db.execute("INSERT INTO groups(tenant_id,name) VALUES(?,?)", (tenant, str(data["name"])))
                 elif resource == "links":
@@ -499,10 +618,12 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "bootstrap":
         bootstrap(sys.argv[2])
+    elif len(sys.argv) == 2 and sys.argv[1] == "bootstrap-platform":
+        bootstrap_platform()
     elif len(sys.argv) == 2 and sys.argv[1] == "serve":
         with connect():
             pass
         print(f"Listening at http://{HOST}:{PORT}")
         ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     else:
-        raise SystemExit("Usage: python app.py bootstrap TENANT_NAME | serve")
+        raise SystemExit("Usage: python app.py bootstrap TENANT_NAME | bootstrap-platform | serve")
