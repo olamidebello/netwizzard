@@ -21,6 +21,9 @@ class ApiTests(unittest.TestCase):
                 tid = db.execute("INSERT INTO tenants(name) VALUES(?)", (tenant,)).lastrowid
                 db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)",
                            (tid, "admin", "admin", hashlib.sha256(key.encode()).hexdigest()))
+                if tenant == "A":
+                    db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,?,?)",
+                               (tid, "second-admin", "admin", hashlib.sha256(b"c").hexdigest()))
 
     def tearDown(self):
         self.temp.cleanup()
@@ -66,6 +69,41 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(headers["status"], 200)
         self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
         self.assertIn(b"Netwizzard Console", handler.wfile.getvalue())
+
+    def test_group_deployment_approval_and_worker(self):
+        _, group = self.call("POST", "/groups", data={"name": "edge"})
+        _, device = self.call("POST", "/devices", data={"name": "edge-1", "address": "192.0.2.1", "kind": "server"})
+        self.call("POST", f"/devices/{device['id']}/groups/{group['id']}", data={})
+        status, result = self.call("POST", "/deployments", data={"group_id": group["id"], "operation": "ansible_check"})
+        self.assertEqual(status, 201)
+        job_id = result["job_ids"][0]
+        self.assertEqual(self.call("POST", f"/jobs/{job_id}/approve", key="c", data={})[0], 200)
+        self.assertEqual(self.call("GET", "/jobs")[1][0]["state"], "approved")
+        import importlib
+        import unittest.mock
+        import sys
+        sys.path.insert(0, ROOT)
+        try:
+            worker = importlib.import_module("worker")
+            worker.app = app
+            with unittest.mock.patch.dict(os.environ, {"NETWIZZARD_ANSIBLE_ENABLED": "1"}):
+                self.assertTrue(worker.run_once(lambda job: job["address"] == "192.0.2.1"))
+        finally:
+            sys.path.remove(ROOT)
+        self.assertEqual(self.call("GET", "/jobs")[1][0]["state"], "succeeded")
+
+    def test_event_rule_queues_only_approved_target_group(self):
+        _, group = self.call("POST", "/groups", data={"name": "edge"})
+        _, a = self.call("POST", "/devices", data={"name": "a", "address": "192.0.2.1", "kind": "server"})
+        _, b = self.call("POST", "/devices", data={"name": "b", "address": "192.0.2.2", "kind": "server"})
+        self.call("POST", f"/devices/{a['id']}/groups/{group['id']}", data={})
+        self.call("POST", "/automation_rules", data={"name": "critical edge check", "severity": "critical", "group_id": group["id"], "operation": "ansible_check"})
+        for device in (a, b):
+            self.call("POST", "/events", data={"device_id": device["id"], "severity": "critical", "message": "down"})
+        jobs = self.call("GET", "/jobs")[1]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["device_id"], a["id"])
+        self.assertEqual(jobs[0]["state"], "pending_approval")
 
 
 if __name__ == "__main__":
