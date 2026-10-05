@@ -22,6 +22,14 @@ curl -X POST -H "Authorization: Bearer $NETWIZZARD_API_KEY" -H 'Content-Type: ap
 
 Available collections: `/devices`, `/groups`, `/links`, `/events`, `/jobs`, `/automation_rules`, `/audit`. Assign a group with `POST /devices/{device_id}/groups/{group_id}`. Approval is `POST /jobs/{id}/approve` by a different admin. Review-only jobs (`backup`, `config_review`, `patch_review`, `remote_session`) record intent and never execute device commands. The two Ansible operations require the separate opt-in worker described below.
 
+## Inventory, configuration and access controls
+
+- The Devices tab accepts manual entries and a CSV file with `name,address,kind,notes` headers (up to 500 rows and 400 KB). Quoted fields are supported. The backend validates the whole batch and inserts it atomically; duplicate names reject the upload. Search filters the visible inventory.
+- Device groups can be created, renamed, assigned and unassigned in the console. All actions are tenant scoped.
+- A manual configuration draft can be saved for a device and loaded later as a new revision. Draft text is stored in SQLite and **is not pushed to the device**. Do not paste credentials or private keys into drafts.
+- Tenant admins can create users as admin, operator or viewer and revoke access. A generated API key is returned once; only its SHA-256 hash is stored. Viewers can read; operators can manage inventory and request jobs; admins can manage users, scripts, rules and schedules. The current admin cannot revoke their own account. Key rotation, MFA, OIDC/LDAP and session management remain production work.
+- Admins can upload `.yml`, `.yaml` or `.sh` files (up to 128 KB) to the script library. Files receive a SHA-256 digest and can be reviewed in the console. **Uploaded scripts are never handed to the Ansible worker and cannot execute.** Only the two checked-in playbooks can run.
+
 ## Approved mass deployment and event triggers
 
 The Automation tab can queue `ansible_check` or `ansible_deploy` for every device in one group (up to 100 per request). An admin can create a severity rule, optionally scoped to a group. A matching event queues a job for its device. Every job starts in `pending_approval`; a **different** admin must approve it. The GUI shows status and allows approval. Only allowlisted Ansible operations can run; review-only jobs never execute.
@@ -42,17 +50,17 @@ In the Automation tab, an admin can create a schedule for one device group with 
 
 Each worker cycle atomically processes up to 25 due schedules, queues up to 100 jobs per group, and records one run for each due time. It moves the next run forward from the current time, so an outage does not flood devices with missed intervals. If a group exceeds 100 members, that schedule is paused. An empty group records a zero-job run. Every queued job still needs approval by an admin other than the schedule creator; schedules do not grant standing permission to execute. The worker must remain running under a process supervisor for recurring schedules to fire.
 
-The API key from `bootstrap` belongs to one administrator. To use two-person approval, create a second admin principal with a distinct hashed key in the database or add a secure enrollment flow before production use. Do not share the bootstrap key between administrators.
+The API key from `bootstrap` belongs to one administrator. Use the Users & scripts tab to create a second admin with a distinct key for two-person approvals. Deliver that one-time key through a secure channel. Do not share the bootstrap key between administrators.
 
 This does not provide production-grade mass rollout yet: add durable worker leases and restart recovery, retries with bounds, maintenance windows, canary groups, rollback, vault-backed credentials, signed playbook releases, and device-specific modules. The event source is currently an authenticated API caller, not a live telemetry collector. Verify host ownership and authorization before enabling the worker against any real device.
 
-Every record carries a tenant ID. Read and write queries scope by the authenticated principal's tenant. Roles are `viewer`, `operator`, and `admin`; this initial CLI creates an admin only. The database schema anticipates richer user management, but secure principal enrollment and key rotation need implementation before production use.
+Every record carries a tenant ID. Read and write queries scope by the authenticated principal's tenant. Roles are `viewer`, `operator`, and `admin`; the CLI creates the first admin and the admin API can enroll more users. Stronger credential storage and key rotation remain production work.
 
 ## Requested capability map
 
 | Requirement | Current state | Next implementation |
 | --- | --- | --- |
-| Multi-tenant device inventory, upload/manual entry, groups | Tenant-scoped API and group assignment | CSV import with validation, UI, ownership and credential vault |
+| Multi-tenant device inventory, upload/manual entry, groups | Tenant-scoped manual entry, CSV import, search, groups and drafts | Discovery, ownership and credential vault |
 | Topology and event monitoring | Stored links and events | Discovery agents, polling, event correlation and notifications |
 | Scheduling and mass deployment | Recurring group scheduler, pause/resume, severity triggers, separate-admin approval, opt-in Ansible checks/Debian baseline | Durable worker, canary rollout, rollback and device-specific modules |
 | Direct connections and remote desktop | Approval queue only | Brokered sessions with MFA, recording and expiring grants |
