@@ -4,7 +4,7 @@
   let key = '';
   let me = null;
   let refreshTimer = null;
-  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: []};
+  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: [], audit: [], schedule_runs: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
     const element = document.createElement(tag);
@@ -146,7 +146,10 @@
     jobs.replaceChildren();
     data.jobs.forEach((item) => {
       const actions = node('div', 'tags');
-      if (me.role === 'admin' && item.state === 'pending_approval') {
+      if (item.can_approve) {
+        const choice = node('input'); choice.type = 'checkbox'; choice.className = 'job-select'; choice.value = String(item.id);
+        choice.setAttribute('aria-label', `Select job ${item.id} for approval`);
+        actions.append(choice);
         const action = node('button', 'secondary', 'Approve');
         action.type = 'button';
         action.addEventListener('click', async () => {
@@ -180,9 +183,16 @@
     }
     const rules = $('#rule-list');
     rules.replaceChildren();
-    data.automation_rules.forEach((item) => card(rules, item.name,
-      `${item.severity} event · ${item.group_id ? data.groups.find((group) => group.id === item.group_id)?.name || 'Group' : 'All devices'} · ${item.operation.replaceAll('_', ' ')}`,
-      item.enabled ? 'enabled' : 'disabled'));
+    data.automation_rules.forEach((item) => {
+      const toggle = node('button', 'secondary', item.enabled ? 'Disable' : 'Enable'); toggle.type = 'button'; toggle.disabled = me.role !== 'admin';
+      toggle.addEventListener('click', async () => {
+        try { await api(`/automation_rules/${item.id}/${item.enabled ? 'disable' : 'enable'}`, {method: 'POST'}); await refresh(); notice(`Rule ${item.enabled ? 'disabled' : 'enabled'}.`); }
+        catch (error) { notice(error.message, true); }
+      });
+      card(rules, item.name,
+        `${item.severity} event · ${item.group_id ? data.groups.find((group) => group.id === item.group_id)?.name || 'Group' : 'All devices'} · ${item.operation.replaceAll('_', ' ')}`,
+        item.enabled ? 'enabled' : 'disabled', toggle);
+    });
     if (!data.automation_rules.length) empty(rules, 'No event trigger rules yet.');
     const schedules = $('#schedule-list');
     schedules.replaceChildren();
@@ -225,6 +235,11 @@
       card(scripts, item.name, `SHA-256 ${item.sha256.slice(0, 16)}… · ${new Date(item.created_at).toLocaleString()}`, 'stored', view);
     });
     if (!data.scripts.length) empty(scripts, me.role === 'admin' ? 'No scripts uploaded.' : 'Admin access required.');
+    const activity = $('#activity-list'); activity.replaceChildren();
+    data.audit.forEach((entry) => card(activity, entry.action.replaceAll('_', ' '), `Target ${entry.target} · ${new Date(entry.created_at).toLocaleString()}`));
+    data.schedule_runs.forEach((entry) => card(activity, `Schedule #${entry.schedule_id} ran`, `${entry.job_count} jobs queued · ${new Date(entry.created_at).toLocaleString()}`));
+    if (!data.audit.length && !data.schedule_runs.length) empty(activity, 'No activity recorded yet.');
+    $('#approve-selected').disabled = me.role !== 'admin';
     document.querySelectorAll('.form-card button').forEach((button) => { button.disabled = me.role === 'viewer'; });
     $('#rule-form button').disabled = me.role !== 'admin';
     $('#schedule-form button').disabled = me.role !== 'admin';
@@ -233,7 +248,7 @@
     document.querySelectorAll('[data-widget]').forEach((box) => { $(`#widget-${box.dataset.widget}`).hidden = !box.checked; });
   }
   async function refresh() {
-    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts'];
+    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs'];
     if (me.role === 'admin') collections.push('users', 'scripts');
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
@@ -244,6 +259,9 @@
     key = $('#key').value.trim();
     try {
       me = await api('/me');
+      const prefs = await api('/preferences');
+      $('#refresh-interval').value = String(prefs.refresh_seconds);
+      document.querySelectorAll('[data-widget]').forEach((box) => { box.checked = prefs.widgets[box.dataset.widget]; });
       await refresh();
       $('#key').value = '';
       $('#tenant').textContent = me.tenant;
@@ -258,7 +276,7 @@
   $('#lock').addEventListener('click', () => {
     if (refreshTimer) clearInterval(refreshTimer);
     key = ''; me = null;
-    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: []};
+    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: [], audit: [], schedule_runs: []};
     $('#generated-key').textContent = ''; $('#one-time-key').hidden = true;
     $('#script-preview').textContent = ''; $('#script-preview').hidden = true;
     $('#workspace').hidden = true;
@@ -266,17 +284,26 @@
     $('#lock').hidden = true;
   });
   $('#refresh').addEventListener('click', () => refresh().then(() => notice('Data refreshed.')).catch((error) => notice(error.message, true)));
+  $('#activity-refresh').addEventListener('click', () => refresh().then(() => notice('Activity refreshed.')).catch((error) => notice(error.message, true)));
+  $('#approve-selected').addEventListener('click', async () => {
+    const job_ids = [...document.querySelectorAll('.job-select:checked')].map((box) => Number(box.value));
+    if (!job_ids.length) return notice('Select pending jobs requested by another administrator.', true);
+    try { const result = await api('/jobs/approve-batch', {method: 'POST', body: {job_ids}}); await refresh(); notice(`${result.approved.length} jobs approved.`); }
+    catch (error) { notice(error.message, true); }
+  });
+  async function savePreferences() {
+    const widgets = Object.fromEntries([...document.querySelectorAll('[data-widget]')].map((box) => [box.dataset.widget, box.checked]));
+    try { await api('/preferences', {method: 'POST', body: {widgets, refresh_seconds: Number($('#refresh-interval').value)}}); }
+    catch (error) { notice(error.message, true); }
+  }
   function setAutoRefresh() {
     if (refreshTimer) clearInterval(refreshTimer);
     const seconds = Number($('#refresh-interval').value);
-    localStorage.setItem('netwizzard-refresh', String(seconds));
     if (seconds) refreshTimer = setInterval(() => refresh().catch((error) => notice(error.message, true)), seconds * 1000);
   }
-  $('#refresh-interval').value = localStorage.getItem('netwizzard-refresh') || '0';
-  $('#refresh-interval').addEventListener('change', setAutoRefresh);
+  $('#refresh-interval').addEventListener('change', () => { setAutoRefresh(); savePreferences(); });
   document.querySelectorAll('[data-widget]').forEach((box) => {
-    box.checked = localStorage.getItem(`netwizzard-widget-${box.dataset.widget}`) !== 'false';
-    box.addEventListener('change', () => { localStorage.setItem(`netwizzard-widget-${box.dataset.widget}`, String(box.checked)); render(); });
+    box.addEventListener('change', () => { render(); savePreferences(); });
   });
   $('#search').addEventListener('input', render);
   document.querySelectorAll('.tabs button').forEach((button) => button.addEventListener('click', () => {
