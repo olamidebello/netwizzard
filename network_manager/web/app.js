@@ -4,7 +4,7 @@
   let key = '';
   let me = null;
   let refreshTimer = null;
-  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], config_drafts: [], audit: [], schedule_runs: []};
+  let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], alerts: [], alert_policies: [], config_drafts: [], audit: [], schedule_runs: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
     const element = document.createElement(tag);
@@ -83,6 +83,7 @@
     for (const [label, count] of [
       ['Devices', data.devices.length], ['Groups', data.groups.length],
       ['Open events', data.events.filter((event) => event.status !== 'resolved').length],
+      ['Active alerts', data.alerts.filter((alert) => alert.state !== 'resolved').length],
       ['Pending requests', data.jobs.filter((job) => job.state === 'pending_approval').length]
     ]) {
       const item = node('div', 'metric');
@@ -99,6 +100,7 @@
     options($('#device-form select[name="owner_id"]'), data.users.filter((user) => user.active), 'Unassigned');
     options($('#ownership-form select[name="owner_id"]'), data.users.filter((user) => user.active), 'Unassigned');
     options($('#telemetry-device'), data.devices, 'All devices');
+    options($('#alert-policy-form select[name="group_id"]'), data.groups, 'All devices');
     const devices = $('#device-list');
     devices.replaceChildren();
     const search = $('#search').value.toLowerCase().trim();
@@ -180,6 +182,32 @@
     data.telemetry.filter((item) => !selectedDevice || item.device_id === selectedDevice).forEach((item) =>
       card(telemetry, deviceName(item.device_id), `Agent #${item.agent_id} · CPU ${item.cpu_percent ?? '—'}% · memory ${item.memory_percent ?? '—'}% · ${new Date(item.created_at).toLocaleString()}`, item.status));
     if (!telemetry.children.length) empty(telemetry, 'No agent telemetry for this selection.');
+    const alerts = $('#alert-list'); alerts.replaceChildren();
+    const alertFilter = $('#alert-state').value;
+    data.alerts.filter((item) => alertFilter === 'all' || (alertFilter === 'active' ? item.state !== 'resolved' : item.state === 'resolved')).forEach((item) => {
+      const actions = node('div', 'tags');
+      if (me.role !== 'viewer' && item.state !== 'resolved') {
+        const action = item.state === 'open' ? 'acknowledge' : 'resolve';
+        const button = node('button', 'secondary', action === 'acknowledge' ? 'Acknowledge' : 'Resolve'); button.type='button';
+        button.addEventListener('click', async () => {
+          try { await api(`/alerts/${item.id}/${action}`, {method:'POST'}); await refresh(); notice(`Alert ${action === 'acknowledge' ? 'acknowledged' : 'resolved'}.`); }
+          catch (error) { notice(error.message,true); }
+        }); actions.append(button);
+      }
+      card(alerts, `${item.policy_name} · ${deviceName(item.device_id)}`, `${item.state} · ${item.occurrences} report(s) · last ${new Date(item.last_seen).toLocaleString()}`, item.severity, actions);
+    });
+    if (!alerts.children.length) empty(alerts, 'No alerts in this view.');
+    const policies = $('#alert-policy-list'); policies.replaceChildren();
+    data.alert_policies.forEach((item) => {
+      const button = node('button','secondary',item.enabled?'Pause':'Resume'); button.type='button'; button.disabled=me.role!=='admin';
+      button.addEventListener('click', async () => {
+        try { await api(`/alert_policies/${item.id}/${item.enabled?'pause':'resume'}`, {method:'POST'}); await refresh(); notice('Alert policy updated.'); }
+        catch (error) { notice(error.message,true); }
+      });
+      const group = data.groups.find((entry)=>entry.id===item.group_id)?.name || 'All devices';
+      card(policies,item.name,`${item.metric}${item.threshold===null?'':` ≥ ${item.threshold}%`} · ${group} · ${item.severity}`,item.enabled?'active':'paused',button);
+    });
+    if (!policies.children.length) empty(policies,'No alert policies yet.');
     const jobs = $('#job-list');
     jobs.replaceChildren();
     const jobSearch = $('#job-search').value.toLowerCase().trim();
@@ -297,12 +325,13 @@
     $('#script-form button').disabled = me.role !== 'admin';
     $('#agent-form button').disabled = me.role !== 'admin';
     $('#ownership-form button').disabled = me.role !== 'admin';
+    $('#alert-policy-form button').disabled = me.role !== 'admin';
     $('#device-form select[name="owner_id"]').disabled = me.role !== 'admin';
     $('#device-form input[name="credential_ref"]').disabled = me.role !== 'admin';
     document.querySelectorAll('[data-widget]').forEach((box) => { $(`#widget-${box.dataset.widget}`).hidden = !box.checked; });
   }
   async function refresh() {
-    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs', 'telemetry'];
+    const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts', 'audit', 'schedule_runs', 'telemetry', 'alerts', 'alert_policies'];
     if (me.role === 'admin') collections.push('users', 'scripts', 'agents');
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
@@ -338,7 +367,7 @@
   $('#lock').addEventListener('click', () => {
     if (refreshTimer) clearInterval(refreshTimer);
     key = ''; me = null;
-    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], config_drafts: [], audit: [], schedule_runs: []};
+    data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], alerts: [], alert_policies: [], config_drafts: [], audit: [], schedule_runs: []};
     $('#generated-key').textContent = ''; $('#one-time-key').hidden = true;
     $('#script-preview').textContent = ''; $('#script-preview').hidden = true;
     $('#workspace').hidden = true;
@@ -374,6 +403,8 @@
   $('#job-search').addEventListener('input', render);
   $('#telemetry-device').addEventListener('change', render);
   $('#telemetry-refresh').addEventListener('click', () => refresh().then(() => notice('Telemetry refreshed.')).catch((error) => notice(error.message,true)));
+  $('#alert-refresh').addEventListener('click', () => refresh().then(() => notice('Alerts refreshed.')).catch((error) => notice(error.message,true)));
+  $('#alert-state').addEventListener('change', render);
   document.querySelectorAll('.tabs button').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.tabs button').forEach((tab) => tab.removeAttribute('aria-current'));
     button.setAttribute('aria-current', 'page');
@@ -394,6 +425,12 @@
   }
   form('#device-form', '/devices');
   form('#ownership-form', (fields) => `/devices/${Number(fields.device_id)}/update`, (fields) => ({owner_id:fields.owner_id ? Number(fields.owner_id) : null,credential_ref:fields.credential_ref}));
+  form('#alert-policy-form', '/alert_policies', (fields) => ({name:fields.name, metric:fields.metric, severity:fields.severity, group_id:fields.group_id?Number(fields.group_id):null, threshold:fields.metric==='status_down'?null:Number(fields.threshold)}));
+  $('#alert-policy-form select[name="metric"]').addEventListener('change', (event) => {
+    const threshold = $('#alert-policy-form input[name="threshold"]');
+    threshold.disabled = event.target.value === 'status_down'; threshold.required = !threshold.disabled;
+  });
+  $('#alert-policy-form select[name="metric"]').dispatchEvent(new Event('change'));
   $('#tenant-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     try { platformResult(await api('/platform/tenants', {method:'POST',body:Object.fromEntries(new FormData(event.currentTarget))})); event.currentTarget.reset(); await refreshPlatform(); }
