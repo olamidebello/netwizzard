@@ -10,6 +10,15 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+WEB = Path(__file__).with_name("web")
+ASSETS = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
+    "/icon.svg": ("icon.svg", "image/svg+xml"),
+}
+
 DB = os.environ.get("NETWIZZARD_DB", "netwizzard.sqlite3")
 HOST = os.environ.get("NETWIZZARD_HOST", "127.0.0.1")
 PORT = int(os.environ.get("NETWIZZARD_PORT", "8080"))
@@ -50,6 +59,21 @@ def bootstrap(name):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def static(self):
+        asset = ASSETS.get(self.path)
+        if not asset:
+            return False
+        data = (WEB / asset[0]).read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", asset[1])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'")
+        self.end_headers()
+        self.wfile.write(data)
+        return True
+
     def send(self, status, obj):
         data = json.dumps(obj).encode()
         self.send_response(status)
@@ -94,6 +118,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(401, {"error": "Authentication required"})
             tenant = user["tenant_id"]
             role = user["role"]
+            if path == ["me"] and method == "GET":
+                name = db.execute("SELECT name FROM tenants WHERE id=?", (tenant,)).fetchone()[0]
+                return self.send(200, {"tenant": name, "name": user["name"], "role": role})
             resource = path[0]
             if resource not in ("devices", "groups", "links", "events", "jobs", "audit"):
                 return self.send(404, {"error": "Not found"})
@@ -170,6 +197,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(409, {"error": "Conflicting or invalid record"})
 
     def do_GET(self):
+        if self.static():
+            return
         self.dispatch("GET")
 
     def do_POST(self):
