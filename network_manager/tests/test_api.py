@@ -93,6 +93,45 @@ class ApiTests(unittest.TestCase):
         device = self.call("GET", "/devices")[1][0]
         self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", key=operator["api_key"], data={"credential_ref":"vault://secret"})[0], 403)
 
+    def test_threshold_alert_dedup_acknowledge_recovery_and_tenant_scope(self):
+        _, agent = self.call("POST", "/agents", data={"name":"collector"})
+        self.assertEqual(self.call("POST", "/alert_policies", key="b", data={"name":"bad","metric":"cpu_percent","threshold":80,"severity":"critical","group_id":999})[0], 400)
+        status, policy = self.call("POST", "/alert_policies", data={"name":"High CPU","metric":"cpu_percent","threshold":80,"severity":"critical"})
+        self.assertEqual(status, 201)
+        report = {"name":"edge","address":"192.0.2.10","kind":"router","status":"up","cpu_percent":90}
+        for _ in range(2):
+            self.assertEqual(self.call("POST", "/agent/report", key=agent["agent_key"], data=report)[0], 200)
+        alert = self.call("GET", "/alerts")[1][0]
+        self.assertEqual(alert["occurrences"], 2)
+        self.assertEqual(len(self.call("GET", "/events")[1]), 1)
+        self.assertEqual(self.call("GET", "/alerts", key="b")[1], [])
+        self.assertEqual(self.call("POST", f"/alerts/{alert['id']}/acknowledge", key="b", data={})[0], 409)
+        self.assertEqual(self.call("POST", f"/alerts/{alert['id']}/acknowledge", data={})[0], 200)
+        report["cpu_percent"] = 20
+        self.call("POST", "/agent/report", key=agent["agent_key"], data=report)
+        self.assertEqual(self.call("GET", "/alerts")[1][0]["state"], "resolved")
+        self.assertEqual(self.call("GET", "/events")[1][0]["status"], "resolved")
+        self.assertEqual(self.call("GET", "/exports/alerts")[1]["rows"][0][3], "resolved")
+        self.call("POST", f"/alert_policies/{policy['id']}/pause", data={})
+        report["cpu_percent"] = 95
+        self.call("POST", "/agent/report", key=agent["agent_key"], data=report)
+        self.assertEqual(len(self.call("GET", "/alerts")[1]), 1)
+
+    def test_down_alert_policy_uses_single_event_and_group_boundary(self):
+        _, agent = self.call("POST", "/agents", data={"name":"collector"})
+        _, group = self.call("POST", "/groups", data={"name":"core"})
+        self.call("POST", "/alert_policies", data={"name":"Core down","metric":"status_down","severity":"critical","group_id":group["id"]})
+        report = {"name":"router","address":"192.0.2.11","kind":"router","status":"up"}
+        _, result = self.call("POST", "/agent/report", key=agent["agent_key"], data=report)
+        self.call("POST", f"/devices/{result['device_id']}/groups/{group['id']}", data={})
+        report["status"] = "down"
+        self.call("POST", "/agent/report", key=agent["agent_key"], data=report)
+        self.assertEqual(len(self.call("GET", "/events")[1]), 1)
+        self.assertEqual(len(self.call("GET", "/alerts")[1]), 1)
+        report["status"] = "up"
+        self.call("POST", "/agent/report", key=agent["agent_key"], data=report)
+        self.assertEqual(self.call("GET", "/alerts")[1][0]["state"], "resolved")
+
     def test_expired_worker_claim_requires_review(self):
         import importlib
         import sys
