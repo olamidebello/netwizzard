@@ -3,6 +3,7 @@
   'use strict';
   let key = '';
   let me = null;
+  let refreshTimer = null;
   let data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: []};
   const $ = (selector) => document.querySelector(selector);
   const node = (tag, className, value) => {
@@ -52,7 +53,7 @@
     metrics.replaceChildren();
     for (const [label, count] of [
       ['Devices', data.devices.length], ['Groups', data.groups.length],
-      ['Open events', data.events.filter((event) => event.severity !== 'info').length],
+      ['Open events', data.events.filter((event) => event.status !== 'resolved').length],
       ['Pending requests', data.jobs.filter((job) => job.state === 'pending_approval').length]
     ]) {
       const item = node('div', 'metric');
@@ -84,6 +85,14 @@
         });
         tags.append(remove);
       });
+      const edit = node('button', 'secondary', 'Edit'); edit.type = 'button'; edit.disabled = me.role === 'viewer';
+      edit.addEventListener('click', async () => {
+        const name = prompt('Device name', item.name); if (name === null) return;
+        const address = prompt('Device address', item.address); if (address === null) return;
+        const kind = prompt('Device type', item.kind); if (kind === null) return;
+        try { await api(`/devices/${item.id}/update`, {method: 'POST', body: {name, address, kind}}); await refresh(); notice('Device updated.'); }
+        catch (error) { notice(error.message, true); }
+      }); tags.append(edit);
       card(devices, item.name, `${item.kind} · ${item.address}${item.notes ? ` · ${item.notes}` : ''}`, item.status, tags);
     });
     if (!shown.length) empty(devices, search ? 'No devices match your search.' : 'No devices yet. Add your first device.');
@@ -119,14 +128,26 @@
     if (!data.links.length) empty(links, 'No topology links have been recorded.');
     const events = $('#event-list');
     events.replaceChildren();
-    data.events.forEach((item) => card(events, item.message, `${deviceName(item.device_id)} · ${new Date(item.created_at).toLocaleString()}`, item.severity));
+    data.events.forEach((item) => {
+      const actions = node('div', 'tags');
+      if (me.role !== 'viewer' && item.status !== 'resolved') {
+        for (const action of item.status === 'open' ? ['acknowledge', 'resolve'] : ['resolve']) {
+          const button = node('button', 'secondary', action === 'acknowledge' ? 'Acknowledge' : 'Resolve'); button.type = 'button';
+          button.addEventListener('click', async () => {
+            try { await api(`/events/${item.id}/${action}`, {method: 'POST'}); await refresh(); notice(`Event ${action === 'acknowledge' ? 'acknowledged' : 'resolved'}.`); }
+            catch (error) { notice(error.message, true); }
+          }); actions.append(button);
+        }
+      }
+      card(events, item.message, `${deviceName(item.device_id)} · ${new Date(item.created_at).toLocaleString()} · ${item.status}`, item.severity, actions);
+    });
     if (!data.events.length) empty(events, 'No events have been recorded.');
     const jobs = $('#job-list');
     jobs.replaceChildren();
     data.jobs.forEach((item) => {
-      let action;
+      const actions = node('div', 'tags');
       if (me.role === 'admin' && item.state === 'pending_approval') {
-        action = node('button', 'secondary', 'Approve');
+        const action = node('button', 'secondary', 'Approve');
         action.type = 'button';
         action.addEventListener('click', async () => {
           try {
@@ -135,11 +156,28 @@
             await refresh();
           } catch (error) { notice(error.message, true); }
         });
+        actions.append(action);
+      }
+      if (me.role !== 'viewer' && ['pending_approval', 'approved'].includes(item.state)) {
+        const cancel = node('button', 'secondary', 'Cancel'); cancel.type = 'button';
+        cancel.addEventListener('click', async () => {
+          try { await api(`/jobs/${item.id}/cancel`, {method: 'POST'}); await refresh(); notice('Task cancelled.'); }
+          catch (error) { notice(error.message, true); }
+        }); actions.append(cancel);
       }
       card(jobs, `${item.operation.replaceAll('_', ' ')} · ${deviceName(item.device_id)}`,
-        `${item.schedule_at || 'No schedule'} · ${new Date(item.created_at).toLocaleString()}`, item.state, action);
+        `${item.schedule_at || 'No schedule'} · ${new Date(item.created_at).toLocaleString()}`, item.state, actions);
     });
     if (!data.jobs.length) empty(jobs, 'No change requests yet.');
+    for (const [widget, items, format] of [
+      ['devices', data.devices, (item) => [item.name, `${item.kind} · ${item.address}`]],
+      ['tasks', data.jobs, (item) => [`${item.operation.replaceAll('_', ' ')} · ${deviceName(item.device_id)}`, item.state]],
+      ['events', data.events, (item) => [item.message, `${deviceName(item.device_id)} · ${item.status}`]]
+    ]) {
+      const target = $(`#widget-${widget} .cards`); target.replaceChildren();
+      items.slice(0, 5).forEach((item) => { const [title, detail] = format(item); card(target, title, detail); });
+      if (!items.length) empty(target, `No ${widget} yet.`);
+    }
     const rules = $('#rule-list');
     rules.replaceChildren();
     data.automation_rules.forEach((item) => card(rules, item.name,
@@ -192,6 +230,7 @@
     $('#schedule-form button').disabled = me.role !== 'admin';
     $('#user-form button').disabled = me.role !== 'admin';
     $('#script-form button').disabled = me.role !== 'admin';
+    document.querySelectorAll('[data-widget]').forEach((box) => { $(`#widget-${box.dataset.widget}`).hidden = !box.checked; });
   }
   async function refresh() {
     const collections = ['devices', 'groups', 'memberships', 'links', 'events', 'jobs', 'automation_rules', 'schedules', 'config_drafts'];
@@ -212,10 +251,12 @@
       $('#login').hidden = true;
       $('#workspace').hidden = false;
       $('#lock').hidden = false;
+      setAutoRefresh();
       notice('Connected to your tenant workspace.');
     } catch (error) { key = ''; alert(error.message); }
   });
   $('#lock').addEventListener('click', () => {
+    if (refreshTimer) clearInterval(refreshTimer);
     key = ''; me = null;
     data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], config_drafts: []};
     $('#generated-key').textContent = ''; $('#one-time-key').hidden = true;
@@ -225,6 +266,18 @@
     $('#lock').hidden = true;
   });
   $('#refresh').addEventListener('click', () => refresh().then(() => notice('Data refreshed.')).catch((error) => notice(error.message, true)));
+  function setAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    const seconds = Number($('#refresh-interval').value);
+    localStorage.setItem('netwizzard-refresh', String(seconds));
+    if (seconds) refreshTimer = setInterval(() => refresh().catch((error) => notice(error.message, true)), seconds * 1000);
+  }
+  $('#refresh-interval').value = localStorage.getItem('netwizzard-refresh') || '0';
+  $('#refresh-interval').addEventListener('change', setAutoRefresh);
+  document.querySelectorAll('[data-widget]').forEach((box) => {
+    box.checked = localStorage.getItem(`netwizzard-widget-${box.dataset.widget}`) !== 'false';
+    box.addEventListener('change', () => { localStorage.setItem(`netwizzard-widget-${box.dataset.widget}`, String(box.checked)); render(); });
+  });
   $('#search').addEventListener('input', render);
   document.querySelectorAll('.tabs button').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.tabs button').forEach((tab) => tab.removeAttribute('aria-current'));
@@ -288,7 +341,7 @@
     event.preventDefault();
     try {
       const file = event.currentTarget.elements.file.files[0];
-      if (!file || file.size > 400000) throw new Error('Select a CSV file under 400 KB');
+      if (!file || file.size > 2000000) throw new Error('Select a CSV file under 2 MB');
       const rows = parseCsv(await file.text());
       const result = await api('/devices/import', {method: 'POST', body: {rows}});
       event.currentTarget.reset(); await refresh(); notice(`${result.imported} devices imported.`);
@@ -303,4 +356,19 @@
       event.currentTarget.reset(); await refresh(); notice(`Script stored for review (${result.sha256.slice(0, 16)}…). It cannot execute.`);
     } catch (error) { notice(error.message, true); }
   });
+  const csvCell = (value) => {
+    let text = String(value ?? '');
+    if (/^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  };
+  document.querySelectorAll('.export').forEach((button) => button.addEventListener('click', async () => {
+    try {
+      const result = await api(`/exports/${button.dataset.export}`);
+      const csv = [result.columns, ...result.rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
+      const url = URL.createObjectURL(new Blob([csv], {type: 'text/csv;charset=utf-8'}));
+      const link = node('a'); link.href = url; link.download = `netwizzard-${result.name}.csv`;
+      document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      notice(`${result.rows.length} ${result.name} exported.`);
+    } catch (error) { notice(error.message, true); }
+  }));
 })();
