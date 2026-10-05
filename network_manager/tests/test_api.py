@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from io import BytesIO
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -104,6 +105,32 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0]["device_id"], a["id"])
         self.assertEqual(jobs[0]["state"], "pending_approval")
+
+    def test_recurring_schedule_enqueues_once_and_can_pause(self):
+        _, group = self.call("POST", "/groups", data={"name": "edge"})
+        _, device = self.call("POST", "/devices", data={"name": "edge-1", "address": "192.0.2.1", "kind": "server"})
+        self.call("POST", f"/devices/{device['id']}/groups/{group['id']}", data={})
+        status, created = self.call("POST", "/schedules", data={"name": "hourly-check", "group_id": group["id"],
+            "operation": "ansible_check", "interval_seconds": 3600, "next_run_at": "2026-10-04T10:00:00Z"})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.call("GET", "/schedules", key="b")[1], [])
+        import importlib
+        import sys
+        sys.path.insert(0, ROOT)
+        try:
+            worker = importlib.import_module("worker")
+            worker.app = app
+            instant = datetime(2026, 10, 4, 11, tzinfo=timezone.utc)
+            with app.connect() as db:
+                self.assertEqual(worker.enqueue_due(db, instant), 1)
+                self.assertEqual(worker.enqueue_due(db, instant), 0)
+        finally:
+            sys.path.remove(ROOT)
+        self.assertEqual(len(self.call("GET", "/jobs")[1]), 1)
+        self.assertEqual(self.call("GET", "/schedule_runs")[1][0]["job_count"], 1)
+        self.assertEqual(self.call("POST", f"/schedules/{created['id']}/pause", key="b", data={})[0], 404)
+        self.assertEqual(self.call("POST", f"/schedules/{created['id']}/pause", data={})[1], {"enabled": False})
+        self.assertFalse(self.call("GET", "/schedules")[1][0]["enabled"])
 
 
 if __name__ == "__main__":
