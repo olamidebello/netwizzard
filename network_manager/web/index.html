@@ -39,6 +39,7 @@
         <button data-tab="events">Events</button>
         <button data-tab="jobs">Change requests</button>
         <button data-tab="automation">Automation</button>
+        <button data-tab="administration">Users & scripts</button>
       </nav>
       <section id="devices" class="panel">
         <div class="section-heading"><div><h2>Devices</h2><p>Tenant inventory and device groups</p></div><input id="search" type="search" placeholder="Search devices" aria-label="Search devices"></div>
@@ -46,6 +47,10 @@
           <form id="device-form" class="form-card"><h3>Add device</h3><label>Name<input name="name" required maxlength="100"></label><label>Address<input name="address" required maxlength="255" placeholder="IP or hostname"></label><label>Type<input name="kind" required maxlength="80" placeholder="Router, switch, server..."></label><label>Notes<textarea name="notes" rows="2"></textarea></label><button>Add device</button></form>
           <form id="group-form" class="form-card"><h3>Create group</h3><label>Group name<input name="name" required maxlength="100"></label><button class="secondary">Create group</button></form>
           <form id="assign-form" class="form-card"><h3>Assign group</h3><label>Device<select name="device_id" required></select></label><label>Group<select name="group_id" required></select></label><button class="secondary">Assign</button></form>
+          <form id="upload-form" class="form-card"><h3>Upload device list</h3><p class="small">CSV headers: name,address,kind,notes. Up to 500 rows per upload.</p><label>CSV file<input name="file" type="file" accept=".csv,text/csv" required></label><button class="secondary">Import devices</button></form>
+          <form id="config-form" class="form-card"><h3>Manual configuration draft</h3><label>Device<select name="device_id" required></select></label><label>Configuration text<textarea name="content" rows="5" required placeholder="Do not include passwords or private keys"></textarea></label><button class="secondary">Save draft</button></form>
+          <div class="form-card"><h3>Groups</h3><div id="group-list" class="cards"></div></div>
+          <div class="form-card"><h3>Configuration drafts</h3><div id="config-list" class="cards"></div></div>
         </div></div>
       </section>
       <section id="topology" class="panel" hidden><div class="section-heading"><div><h2>Topology</h2><p>Documented connections between devices</p></div></div><div id="link-list" class="cards"></div><form id="link-form" class="form-card inline-form"><label>From<select name="source_id" required></select></label><label>To<select name="target_id" required></select></label><label>Label<input name="label" placeholder="Fiber, VPN, uplink..."></label><button>Add link</button></form></section>
@@ -58,6 +63,14 @@
           <form id="schedule-form" class="form-card"><h3>Recurring schedule</h3><label>Schedule name<input name="name" required maxlength="100"></label><label>Device group<select name="group_id" required></select></label><label>Playbook<select name="operation"><option value="ansible_check">Connectivity and facts check</option><option value="ansible_deploy">Debian baseline</option></select></label><label>Repeat every<select name="interval_seconds"><option value="300">5 minutes</option><option value="3600">1 hour</option><option value="86400">1 day</option><option value="604800">1 week</option></select></label><label>First run<input name="next_run_at" type="datetime-local" required></label><button>Create schedule</button></form>
         </div><h3>Event trigger rules</h3><div id="rule-list" class="cards"></div>
         <h3 class="subheading">Recurring schedules</h3><div id="schedule-list" class="cards"></div>
+      </section>
+      <section id="administration" class="panel" hidden><div class="section-heading"><div><h2>Users & scripts</h2><p>Tenant admins control access. Uploaded scripts are stored for review and cannot run.</p></div></div>
+        <div class="forms automation-forms">
+          <form id="user-form" class="form-card"><h3>Create user</h3><label>Name<input name="name" required maxlength="100"></label><label>Role<select name="role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option></select></label><button>Create user and key</button><p class="small">Copy the key immediately; it is shown once and never stored in the browser.</p></form>
+          <form id="script-form" class="form-card"><h3>Upload deployment script</h3><label>Script file<input name="file" type="file" accept=".yml,.yaml,.sh" required></label><button class="secondary">Store for review</button><p class="small">Scripts are inert uploads. The worker runs only the two built-in playbooks.</p></form>
+        </div>
+        <div id="one-time-key" class="form-card" hidden><h3>New user API key</h3><code id="generated-key"></code><button id="hide-key" type="button" class="secondary">Hide key</button></div>
+        <h3>Users</h3><div id="user-list" class="cards"></div><h3 class="subheading">Stored scripts</h3><div id="script-list" class="cards"></div><pre id="script-preview" hidden></pre>
       </section>
     </section>
   </main>
