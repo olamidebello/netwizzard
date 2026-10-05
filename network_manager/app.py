@@ -48,6 +48,8 @@ def connect():
     db.executescript(SCHEMA)
     if "active" not in [row[1] for row in db.execute("PRAGMA table_info(principals)")]:
         db.execute("ALTER TABLE principals ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+    if "status" not in [row[1] for row in db.execute("PRAGMA table_info(events)")]:
+        db.execute("ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'open'")
     return db
 
 
@@ -122,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self):
         length = int(self.headers.get("Content-Length", "0"))
-        if length > 1048576:
+        if length > 4194304:
             raise ValueError("Body too large")
         value = json.loads(self.rfile.read(length))
         if not isinstance(value, dict):
@@ -159,6 +161,20 @@ class Handler(BaseHTTPRequestHandler):
                 name = db.execute("SELECT name FROM tenants WHERE id=?", (tenant,)).fetchone()[0]
                 return self.send(200, {"id": user["id"], "tenant": name, "name": user["name"], "role": role})
             resource = path[0]
+            if method == "GET" and resource == "exports" and len(path) == 2:
+                columns = {
+                    "devices": ("id", "name", "address", "kind", "status", "notes"),
+                    "groups": ("id", "name"),
+                    "memberships": ("device_id", "group_id"),
+                    "events": ("id", "device_id", "severity", "message", "status", "created_at"),
+                    "jobs": ("id", "device_id", "operation", "schedule_at", "state", "created_at"),
+                }.get(path[1])
+                if not columns:
+                    return self.send(404, {"error": "Unknown export"})
+                fields = ",".join(columns)
+                rows = [list(row) for row in db.execute(f"SELECT {fields} FROM {path[1]} WHERE tenant_id=? ORDER BY id DESC" if path[1] != "memberships" else
+                                                       f"SELECT {fields} FROM memberships WHERE tenant_id=? ORDER BY device_id,group_id", (tenant,))]
+                return self.send(200, {"name": path[1], "columns": columns, "rows": rows})
             if resource not in ("devices", "groups", "memberships", "links", "events", "jobs", "audit", "automation_rules", "deployments", "schedules", "schedule_runs", "users", "config_drafts", "scripts"):
                 return self.send(404, {"error": "Not found"})
             if method == "GET" and path == ["users"]:
@@ -192,8 +208,8 @@ class Handler(BaseHTTPRequestHandler):
                 if role == "viewer":
                     return self.send(403, {"error": "Forbidden"})
                 rows = self.body().get("rows")
-                if not isinstance(rows, list) or not 1 <= len(rows) <= 500:
-                    return self.send(400, {"error": "Provide 1 to 500 device rows"})
+                if not isinstance(rows, list) or not 1 <= len(rows) <= 5000:
+                    return self.send(400, {"error": "Provide 1 to 5000 device rows"})
                 cleaned = []
                 for row in rows:
                     if not isinstance(row, dict):
@@ -220,6 +236,19 @@ class Handler(BaseHTTPRequestHandler):
                                  (tenant, device_id, content, user["id"], now()))
                 self.audit(db, user, "create_config_draft", str(cur.lastrowid))
                 return self.send(201, {"id": cur.lastrowid, "state": "draft_only"})
+            if method == "POST" and resource == "devices" and len(path) == 3 and path[2] == "update":
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                data = self.body()
+                fields = {field: str(data[field]).strip() for field in ("name", "address", "kind", "notes") if field in data}
+                if not fields or any(not value for field, value in fields.items() if field != "notes") or any(len(value) > 1000 for value in fields.values()):
+                    return self.send(400, {"error": "Invalid device update"})
+                assignments = ",".join(f"{field}=?" for field in fields)
+                result = db.execute(f"UPDATE devices SET {assignments} WHERE id=? AND tenant_id=?", [*fields.values(), int(path[1]), tenant])
+                if not result.rowcount:
+                    return self.send(404, {"error": "Device not found"})
+                self.audit(db, user, "update_device", path[1])
+                return self.send(200, {"updated": True})
             if method == "GET" and resource == "config_drafts" and len(path) == 1:
                 return self.send(200, [dict(row) for row in db.execute("SELECT id,device_id,created_at FROM config_drafts WHERE tenant_id=? ORDER BY id DESC LIMIT 500", (tenant,))])
             if method == "GET" and resource == "config_drafts" and len(path) == 2:
@@ -392,6 +421,23 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute("UPDATE jobs SET state='approved', approved_by=? WHERE id=? AND tenant_id=?", (user["id"], job["id"], tenant))
                 self.audit(db, user, "approve_job", str(job["id"]))
                 return self.send(200, {"state": "approved", "execution": "not_implemented"})
+            if method == "POST" and resource == "jobs" and len(path) == 3 and path[2] == "cancel":
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                result = db.execute("UPDATE jobs SET state='cancelled' WHERE id=? AND tenant_id=? AND state IN ('pending_approval','approved')", (int(path[1]), tenant))
+                if not result.rowcount:
+                    return self.send(409, {"error": "Job is unavailable or already running"})
+                self.audit(db, user, "cancel_job", path[1])
+                return self.send(200, {"state": "cancelled"})
+            if method == "POST" and resource == "events" and len(path) == 3 and path[2] in ("acknowledge", "resolve"):
+                if role == "viewer":
+                    return self.send(403, {"error": "Forbidden"})
+                wanted = "acknowledged" if path[2] == "acknowledge" else "resolved"
+                result = db.execute("UPDATE events SET status=? WHERE id=? AND tenant_id=? AND status!='resolved'", (wanted, int(path[1]), tenant))
+                if not result.rowcount:
+                    return self.send(409, {"error": "Event is unavailable or already resolved"})
+                self.audit(db, user, wanted + "_event", path[1])
+                return self.send(200, {"status": wanted})
             return self.send(404, {"error": "Not found"})
 
     def dispatch(self, method):
