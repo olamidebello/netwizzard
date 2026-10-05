@@ -86,6 +86,7 @@ class ApiTests(unittest.TestCase):
             _, job = self.call("POST", "/jobs", data={"device_id":device["id"], "operation":"ansible_check"})
             with app.connect() as db:
                 db.execute("UPDATE jobs SET state='running',lease_until='2000-01-01T00:00:00+00:00' WHERE id=?", (job["id"],))
+                db.commit()
                 self.assertIsNone(worker.claim_one(db))
                 state = db.execute("SELECT state FROM jobs WHERE id=?", (job["id"],)).fetchone()[0]
                 self.assertEqual(state, "needs_review")
