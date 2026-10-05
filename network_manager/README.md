@@ -73,7 +73,15 @@ curl -X POST http://127.0.0.1:8080/agent/report \
   -d '{"name":"edge-1","address":"192.0.2.10","kind":"router","status":"up","cpu_percent":14,"memory_percent":32}'
 ```
 
-The report upserts a tenant device, records a telemetry sample and updates its status. A transition to `down` creates one critical event; repeated down reports do not create another event until status recovers. `GET /telemetry` returns the most recent 500 samples within the authenticated tenant. There is no automated retention cleanup or outbound notification delivery. Keep agent keys on a protected collector and use HTTPS before sending them across a network.
+The report upserts a tenant device, records a telemetry sample and updates its status. A transition to `down` creates a default critical event unless an applicable device-down alert policy creates its own event; repeated down reports do not create another default event until status recovers. `GET /telemetry` returns the most recent 500 samples within the authenticated tenant. There is no automated retention cleanup or outbound notification delivery. Keep agent keys on a protected collector and use HTTPS before sending them across a network.
+
+### Alert policies and monitoring
+
+In **Alerts**, tenant admins can create policies for device-down status, CPU percent or memory percent, optionally restricted to one group. CPU/memory thresholds range from 0 to 100; the threshold is inclusive. A valid agent report evaluates enabled policies for that device. The first breach creates an in-app alert and event, and matching event automation rules can queue approval-required jobs. Later reports update the alert's last-seen time and occurrence count without creating duplicate alerts. A healthy report resolves the active alert and its event. Policies can be paused or resumed by an admin. Pausing stops evaluation; it does not erase prior alerts.
+
+Operators and admins can acknowledge an open alert, then resolve an acknowledged alert; viewers can read. A continuing breach after manual resolution opens a new alert on the next report. The Alerts view filters active, resolved or all alerts, refreshes data and exports tenant-scoped CSV. The dashboard counts active alerts. API endpoints are `GET/POST /alert_policies`, `POST /alert_policies/{id}/pause|resume`, `GET /alerts`, `POST /alerts/{id}/acknowledge|resolve`, and `GET /exports/alerts`.
+
+These are **in-app alerts**, driven only by external agent reports. No email, SMS, push, webhook delivery, independent SNMP polling, guaranteed collection cadence, or retention policy is configured. An agent that stops reporting will not itself create a missing-heartbeat alert.
 
 ### API and operator reference
 
@@ -98,7 +106,7 @@ Every record carries a tenant ID. Read and write queries scope by the authentica
 | Requirement | Current state | Next implementation |
 | --- | --- | --- |
 | Multi-tenant inventory and ownership | Separate platform super admin and tenant admins, isolated inventory, manual entry, CSV, search, groups, owner ID, vault reference metadata, drafts | Tenant suspension, key rotation, actual discovery scanner and vault integration |
-| Topology and events | Stored links, user events, agent status transitions | Polling, richer correlation and notifications |
+| Topology and events | Stored links, user events, agent status transitions, tenant threshold policies, deduplicated in-app alerts, acknowledgement and recovery | Polling, heartbeat detection and outbound notifications |
 | Scheduling and deployment | Group scheduler, severity triggers, separate-admin approval, fixed opt-in Ansible playbooks, expired lease review | Canary rollout, rollback, retries and device-specific modules |
 | SSH and remote desktop | Review request only; no live session GUI | Broker, MFA, recording and expiring grants |
 | LDAP/OIDC | Local API keys and admin/operator/viewer roles | Provider integration, group mapping and finer permissions |
