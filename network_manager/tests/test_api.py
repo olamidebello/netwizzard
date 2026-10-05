@@ -46,6 +46,52 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("POST", "/links", data={"source_id": a["id"], "target_id": b["id"]})[0], 400)
         self.assertEqual(self.call("POST", "/jobs", data={"device_id": b["id"], "operation": "backup"})[0], 404)
 
+    def test_agent_reports_and_vault_references_are_tenant_scoped(self):
+        status, created = self.call("POST", "/agents", data={"name": "site-a"})
+        self.assertEqual(status, 201)
+        report = {"name": "edge", "address": "192.0.2.4", "kind": "router", "status": "down", "cpu_percent": 25}
+        self.assertEqual(self.call("POST", "/agent/report", key=created["agent_key"], data=report)[0], 200)
+        self.assertEqual(len(self.call("GET", "/events")[1]), 1)
+        self.call("POST", "/agent/report", key=created["agent_key"], data=report)
+        self.assertEqual(len(self.call("GET", "/events")[1]), 1)
+        self.assertEqual(len(self.call("GET", "/telemetry")[1]), 2)
+        self.assertEqual(self.call("GET", "/devices", key="b")[1], [])
+        device = self.call("GET", "/devices")[1][0]
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", data={"credential_ref": "plain-secret"})[0], 400)
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", data={"owner_id": 1, "credential_ref": "vault://tenant/edge"})[0], 200)
+        self.assertEqual(self.call("POST", f"/devices/{device['id']}/update", key="b", data={"owner_id": 1})[0], 400)
+        self.call("POST", f"/agents/{created['id']}/revoke", data={})
+        self.assertEqual(self.call("POST", "/agent/report", key=created["agent_key"], data=report)[0], 401)
+
+    def test_platform_admin_provisions_isolated_tenant(self):
+        import hashlib
+        with app.connect() as db:
+            db.execute("INSERT INTO platform_admins(name,key_hash) VALUES(?,?)", ("root", hashlib.sha256(b"platform").hexdigest()))
+        self.assertEqual(self.call("GET", "/platform/tenants", key="a")[0], 401)
+        status, result = self.call("POST", "/platform/tenants", key="platform", data={"name":"C", "admin_name":"owner"})
+        self.assertEqual(status, 201)
+        self.assertEqual(self.call("GET", "/me", key=result["api_key"])[1]["tenant"], "C")
+        self.assertEqual(self.call("GET", "/platform/tenants", key="platform")[0], 200)
+        self.assertEqual(self.call("GET", "/devices", key=result["api_key"])[1], [])
+        self.assertEqual(self.call("GET", "/platform/tenants", key=result["api_key"])[0], 401)
+
+    def test_expired_worker_claim_requires_review(self):
+        import importlib
+        import sys
+        sys.path.insert(0, ROOT)
+        try:
+            worker = importlib.import_module("worker")
+            worker.app = app
+            _, device = self.call("POST", "/devices", data={"name":"host", "address":"192.0.2.1", "kind":"server"})
+            _, job = self.call("POST", "/jobs", data={"device_id":device["id"], "operation":"ansible_check"})
+            with app.connect() as db:
+                db.execute("UPDATE jobs SET state='running',lease_until='2000-01-01T00:00:00+00:00' WHERE id=?", (job["id"],))
+                self.assertIsNone(worker.claim_one(db))
+                state = db.execute("SELECT state FROM jobs WHERE id=?", (job["id"],)).fetchone()[0]
+                self.assertEqual(state, "needs_review")
+        finally:
+            sys.path.remove(ROOT)
+
     def test_jobs_do_not_execute(self):
         _, d = self.call("POST", "/devices", data={"name": "a", "address": "192.0.2.1", "kind": "router"})
         _, job = self.call("POST", "/jobs", data={"device_id": d["id"], "operation": "backup"})
