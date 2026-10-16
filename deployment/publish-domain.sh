@@ -75,7 +75,18 @@ nginx -t && systemctl reload nginx
 HOOK
 chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/netwizzard-reload
 systemctl enable --now certbot.timer
-curl --fail --silent --show-error --resolve netwizzard.tech:443:127.0.0.1 https://netwizzard.tech/health
+# A graceful reload returns before the new workers take over. The old worker
+# may briefly serve another site's certificate; keep TLS verification enabled.
+if ! curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
+    --retry 15 --retry-all-errors --retry-delay 1 --retry-max-time 30 \
+    --resolve netwizzard.tech:443:127.0.0.1 https://netwizzard.tech/health; then
+  echo 'HTTPS verification still failed after retries. Relevant active Nginx configuration:' >&2
+  nginx -T 2>&1 | awk '/^# configuration file / || /^[[:space:]]*(listen|server_name|ssl_certificate|ssl_certificate_key)[[:space:]]/ {print}' >&2 || true
+  echo 'Check for duplicate netwizzard.tech server names or address-specific 443 listeners. Restoring previous configuration.' >&2
+  restore
+  trap - ERR
+  exit 1
+fi
 trap - ERR
 rm -rf "$backup"
 echo
