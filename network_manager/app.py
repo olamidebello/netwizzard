@@ -20,6 +20,7 @@ ASSETS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/netwizzard-logo.jpg": ("netwizzard-logo.jpg", "image/jpeg"),
 }
 
 DB = os.environ.get("NETWIZZARD_DB", "netwizzard.sqlite3")
