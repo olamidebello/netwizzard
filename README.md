@@ -14,6 +14,10 @@ On a Debian server, clone this repository into `/opt/netwizzard`, then run `sudo
 
 ## Proposed service boundaries
 
+### Publish netwizzard.tech
+
+Run `sudo bash deployment/publish-domain.sh` from this checkout. The script installs/updates the application, creates the domain's Nginx reverse proxy, obtains a Let's Encrypt certificate, enables certificate renewal and checks the HTTPS health endpoint. Point the domain's A record (and any AAAA record) at this server and allow inbound TCP 80/443 first. The script only configures `netwizzard.tech`; `www` is not included. It preserves the default site and other domain configurations. An existing separate Nginx configuration for this same domain must be reconciled before running it. Until certificate issuance succeeds, the initial HTTP site serves only ACME challenges and a maintenance response, so API keys are not accepted over plain HTTP.
+
 - Kamailio: SIP edge, registration, routing, and protection.
 - FreeSWITCH: media, PBX, IVR, queues, conferencing, and recordings.
 - PostgreSQL: tenant, DID, rate, routing, CDR, provisioning, and audit data.
