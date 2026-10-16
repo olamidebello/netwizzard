@@ -46,7 +46,7 @@ class ApiTests(unittest.TestCase):
         return "platform"
 
     def register(self, email="new@example.com"):
-        return self.call("POST", "/auth/register", key="", data={"email":email,"name":"New user","tenant_name":"New workspace","password":"long-test-password","role":"super_admin","principal_id":1})
+        return self.call("POST", "/auth/register", key="", data={"email":email,"name":"New user","tenant_name":"New workspace","password":"long-test-password","role":"super_admin","principal_id":1,"terms_accepted":True,"policy_version":app.POLICY_VERSION})
 
     def login(self, email="new@example.com", password="long-test-password"):
         return self.call("POST", "/auth/login", key="", data={"email":email,"password":password})
@@ -209,6 +209,53 @@ class ApiTests(unittest.TestCase):
             connection.sendall.assert_called_once_with(b"CONNECT 10.20.0.4:443 HTTP/1.1\r\nHost: 10.20.0.4:443\r\nConnection: close\r\n\r\n")
             connection.recv.return_value=b"HTTP/1.1 403 Forbidden\r\n"
             self.assertFalse(app.vpn_connect_check({"proxy_host":"169.254.240.6"},"10.20.0.4",443))
+
+    def test_registration_records_policy_acceptance_and_rejects_missing_agreement(self):
+        fields={"email":"terms@example.com","name":"Terms user","tenant_name":"Terms workspace","password":"long-test-password"}
+        self.assertEqual(self.call("POST","/auth/register",key="",data=fields)[0],400)
+        fields.update(terms_accepted=True,policy_version="old")
+        self.assertEqual(self.call("POST","/auth/register",key="",data=fields)[0],400)
+        fields["policy_version"]=app.POLICY_VERSION
+        self.assertEqual(self.call("POST","/auth/register",key="",data=fields)[0],202)
+        with app.connect() as db:
+            rows=db.execute("SELECT * FROM policy_acceptances").fetchall()
+            self.assertEqual(len(rows),1)
+            self.assertEqual(rows[0]["version"],app.POLICY_VERSION)
+        self.call("POST","/auth/register",key="",data=fields)
+        with app.connect() as db:self.assertEqual(db.execute("SELECT count(*) FROM policy_acceptances").fetchone()[0],1)
+
+    def test_legal_request_inbox_is_platform_only_and_resolution_is_audited(self):
+        key=self.platform_key()
+        request=self.call("POST","/legal/requests",key="",data={"email":"request@example.com","category":"privacy","message":"Please close my account."})
+        self.assertEqual(request[0],201)
+        rid=request[1]["request_id"]
+        self.assertEqual(self.call("GET","/platform/legal-requests")[0],401)
+        inbox=self.call("GET","/platform/legal-requests",key=key)[1]
+        self.assertEqual(inbox[0]["message"],"Please close my account.")
+        self.assertEqual(self.call("POST",f"/platform/legal-requests/{rid}/resolve",key=key,data={})[0],200)
+        self.assertIsNotNone(self.call("GET","/platform/legal-requests",key=key)[1][0]["resolved_at"])
+        self.assertEqual(self.call("POST","/legal/requests",key="",data={"email":"x","category":"privacy","message":"short"})[0],400)
+
+    def test_root_cli_promotion_retains_password_revokes_sessions_and_separates_tenant(self):
+        from unittest.mock import patch
+        self.call("POST","/auth/enroll",data={"email":"dobcalldemo@gmail.com","password":"long-test-password"})
+        token=self.login("dobcalldemo@gmail.com")[1]["token"]
+        with patch.object(app.os,"geteuid",return_value=1000):
+            with self.assertRaises(PermissionError):app.promote_platform_account("dobcalldemo@gmail.com")
+        with patch.object(app.os,"geteuid",return_value=0):
+            app.promote_platform_account("dobcalldemo@gmail.com")
+            app.promote_platform_account("dobcalldemo@gmail.com")
+            with self.assertRaises(ValueError):app.promote_platform_account("missing@example.com")
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+        elevated=self.login("dobcalldemo@gmail.com")[1]["token"]
+        self.assertEqual(self.call("GET","/platform/me",key=elevated)[1]["role"],"super_admin")
+        self.assertEqual(self.call("GET","/me",key=elevated)[0],401)
+        with app.connect() as db:self.assertEqual(db.execute("SELECT count(*) FROM platform_admins").fetchone()[0],1)
+
+    def test_legal_pages_are_public_static_assets(self):
+        for route in ("/terms","/privacy","/copyright","/contact","/legal.js"):
+            self.assertIn(route,app.ASSETS)
+            self.assertTrue((app.WEB/app.ASSETS[route][0]).is_file())
 
     def test_tenant_scope_for_devices_and_links(self):
         _, a = self.call("POST", "/devices", data={"name": "a", "address": "192.0.2.1", "kind": "router"})

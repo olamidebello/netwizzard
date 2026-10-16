@@ -65,6 +65,7 @@
     try{const result=await api('/vpn/check',{method:'POST',body:{session_id:vpnSession.session_id,device_id:Number(fields.device_id),port:Number(fields.port)}});vpnNotice(`Device TCP port ${result.port} is reachable through ${result.zone}.`);}catch(e){vpnNotice(e.message);}finally{button.disabled=false;}
   });
   window.addEventListener('pagehide',()=>{if(vpnSession&&key)fetch('/vpn/disconnect',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({session_id:vpnSession.session_id}),keepalive:true}).catch(()=>{});});
+  let policyVersion = '2026-10-16';
   let accounts = [];
   function renderAccounts() {
     const list = $('#account-list'); list.replaceChildren();
@@ -85,7 +86,14 @@
     });
     if (!list.children.length) empty(list, 'No accounts match your search.');
   }
+  async function refreshLegalInbox(){
+    const list=$('#legal-inbox');list.replaceChildren();
+    (await api('/platform/legal-requests')).forEach(r=>{const button=node('button','secondary',r.resolved_at?'Resolved':'Mark resolved');button.type='button';button.disabled=!!r.resolved_at;button.addEventListener('click',async()=>{try{await api(`/platform/legal-requests/${r.id}/resolve`,{method:'POST'});await refreshLegalInbox();}catch(e){$('#platform-notice').textContent=e.message;}});card(list,`#${r.id} · ${r.category} · ${r.email}`,r.message,r.resolved_at?'resolved':'open',button);});
+    if(!list.children.length)empty(list,'No requests received.');
+  }
+  $('#legal-inbox-refresh').addEventListener('click',()=>refreshLegalInbox().catch(e=>{$('#platform-notice').textContent=e.message;}));
   async function refreshPlatform() {
+    await refreshLegalInbox();
     const zones=await api('/platform/vpn-zones'); const zoneList=$('#platform-vpn-zones');zoneList.replaceChildren();
     zones.forEach(z=>card(zoneList,z.name,`Tenants: ${z.tenant_ids.join(', ')} · TCP ports: ${z.allowed_ports.join(', ')}`,z.enabled?'available':'disabled'));
     if(!zones.length)empty(zoneList,'No platform VPN zones provisioned. Use deployment/vpn/install.yml with your VPN configuration.');
@@ -416,6 +424,7 @@
   $('#register-form').addEventListener('submit', async event=>{
     event.preventDefault();const form=event.currentTarget;const values=Object.fromEntries(new FormData(form));
     if(values.password!==values.confirm_password){$('#auth-notice').textContent='Passwords do not match.';return;}
+    values.terms_accepted=form.elements.terms_accepted.checked;values.policy_version=policyVersion;
     delete values.confirm_password;const button=form.querySelector('button');button.disabled=true;
     try{const result=await publicAuth('/auth/register',values);form.reset();$('#auth-notice').textContent=result.message;}
     catch(error){$('#auth-notice').textContent=error.message;}finally{button.disabled=false;}
@@ -441,7 +450,7 @@
   $('#account-search').addEventListener('input',renderAccounts);
   $('#accounts-refresh').addEventListener('click',()=>refreshPlatform().catch(e=>{$('#platform-notice').textContent=e.message;}));
   $('#save-registration').addEventListener('click',async()=>{try{await api('/platform/settings',{method:'POST',body:{registration_open:$('#registration-open').checked}});$('#platform-notice').textContent='Registration settings saved.';}catch(e){$('#platform-notice').textContent=e.message;}});
-  fetch('/auth/config').then(r=>r.json()).then(c=>{if(!c.registration_open){$('#register-form').hidden=true;$('#auth-notice').textContent='Registration is currently closed. Contact your administrator for access.';}}).catch(()=>{});
+  fetch('/auth/config').then(r=>r.json()).then(c=>{policyVersion=c.policy_version||policyVersion;if(!c.registration_open){$('#register-form').hidden=true;$('#auth-notice').textContent='Registration is currently closed. Contact your administrator for access.';}}).catch(()=>{});
   async function openConsole() {
     try {
       try { me = await api('/me'); }

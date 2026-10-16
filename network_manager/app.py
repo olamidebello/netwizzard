@@ -22,8 +22,15 @@ ASSETS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/terms": ("terms.html", "text/html; charset=utf-8"),
+    "/privacy": ("privacy.html", "text/html; charset=utf-8"),
+    "/copyright": ("copyright.html", "text/html; charset=utf-8"),
+    "/contact": ("contact.html", "text/html; charset=utf-8"),
+    "/legal.js": ("legal.js", "text/javascript; charset=utf-8"),
     "/netwizzard-logo.jpg": ("netwizzard-logo.jpg", "image/jpeg"),
 }
+
+POLICY_VERSION = "2026-10-16"
 
 DB = os.environ.get("NETWIZZARD_DB", "netwizzard.sqlite3")
 HOST = os.environ.get("NETWIZZARD_HOST", "127.0.0.1")
@@ -31,6 +38,8 @@ PORT = int(os.environ.get("NETWIZZARD_PORT", "8080"))
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS policy_acceptances(account_id INTEGER NOT NULL REFERENCES accounts(id), version TEXT NOT NULL, accepted_at TEXT NOT NULL, PRIMARY KEY(account_id,version));
+CREATE TABLE IF NOT EXISTS legal_requests(id INTEGER PRIMARY KEY, email TEXT NOT NULL, category TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS vpn_sessions(id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), principal_id INTEGER NOT NULL REFERENCES principals(id), auth_hash TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('local','platform')), zone_id TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, deadline REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','active','suspended','rejected')), tenant_name TEXT NOT NULL DEFAULT '', principal_id INTEGER UNIQUE REFERENCES principals(id), platform_id INTEGER UNIQUE REFERENCES platform_admins(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS account_sessions(token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), expires_at REAL NOT NULL);
@@ -252,6 +261,27 @@ def bootstrap_platform():
     print(key)
 
 
+def promote_platform_account(email):
+    if not hasattr(os,"geteuid") or os.geteuid()!=0:
+        raise PermissionError("Platform promotion must run as root on the application server")
+    email=account_email(email)
+    with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        account=db.execute("SELECT * FROM accounts WHERE email=?",(email,)).fetchone()
+        if not account:
+            raise ValueError("Account not found. Register this email first; no account was created or changed.")
+        platform_id=account["platform_id"]
+        if not platform_id:
+            # Password sign-in is retained; no API key is printed or logged.
+            platform_id=db.execute("INSERT INTO platform_admins(name,key_hash) VALUES(?,?)",(account["name"],hashlib.sha256(secrets.token_bytes(32)).hexdigest())).lastrowid
+        db.execute("UPDATE platform_admins SET active=1 WHERE id=?",(platform_id,))
+        db.execute("UPDATE accounts SET platform_id=?,principal_id=NULL,status='active' WHERE id=?",(platform_id,account["id"]))
+        db.execute("DELETE FROM account_sessions WHERE account_id=?",(account["id"],))
+        db.execute("DELETE FROM vpn_sessions WHERE principal_id=?",(account["principal_id"],))
+        db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)",(platform_id,"promote_account_server_cli",email,now()))
+    print("Super-admin enabled for " + email + ". Sign in again with the existing password.")
+
+
 class Handler(BaseHTTPRequestHandler):
     def static(self):
         asset = ASSETS.get(self.path)
@@ -316,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def account_routes(self, db, method, path):
         if path == ["auth", "config"] and method == "GET":
-            return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0])})
+            return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0]), "policy_version":POLICY_VERSION})
         if path in (["auth", "register"], ["auth", "login"]) and method == "POST":
             data = self.body()
             email = account_email(data.get("email", ""))
@@ -334,11 +364,15 @@ class Handler(BaseHTTPRequestHandler):
             if path[1] == "register":
                 if not db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0]:
                     return self.send(403, {"error":"Registration is currently closed"})
+                if data.get("terms_accepted") is not True or data.get("policy_version") != POLICY_VERSION:
+                    return self.send(400, {"error":"Read and accept the current Terms and acknowledge the Privacy Policy before registering"})
                 name, tenant_name = (str(data.get(k, "")).strip() for k in ("name", "tenant_name"))
                 if not name or len(name)>100 or not tenant_name or len(tenant_name)>100:
                     raise ValueError("Enter your name and workspace name (up to 100 characters each)")
                 encoded = password_hash(data.get("password"))
-                db.execute("INSERT OR IGNORE INTO accounts(email,name,password_hash,status,tenant_name,created_at) VALUES(?,?,?,'pending',?,?)", (email,name,encoded,tenant_name,now()))
+                created = db.execute("INSERT OR IGNORE INTO accounts(email,name,password_hash,status,tenant_name,created_at) VALUES(?,?,?,'pending',?,?)", (email,name,encoded,tenant_name,now()))
+                if created.rowcount:
+                    db.execute("INSERT INTO policy_acceptances VALUES(?,?,?)",(created.lastrowid,POLICY_VERSION,now()))
                 return self.send(202, {"message":"Registration received. A platform administrator must approve a new request before you can sign in. If you already have an account, use Sign in."})
             account = db.execute("SELECT * FROM accounts WHERE email=?", (email,)).fetchone()
             # A fixed dummy scrypt hash makes unknown-account verification comparable.
@@ -460,11 +494,35 @@ class Handler(BaseHTTPRequestHandler):
         if path == ["health"]:
             return self.send(200, {"status": "ok"})
         with connect() as db:
+            if path == ["legal", "requests"] and method == "POST":
+                data = self.body()
+                email = account_email(data.get("email", ""))
+                category = data.get("category")
+                message = str(data.get("message", "")).strip()
+                if category not in ("privacy", "copyright", "terms", "other") or not 10 <= len(message) <= 5000:
+                    raise ValueError("Choose a request category and write 10 to 5,000 characters")
+                peer = getattr(self,"client_address",("local",))[0]
+                bucket = hashlib.sha256(("legal:"+peer).encode()).hexdigest()
+                stamp=time.time()
+                db.execute("DELETE FROM auth_limits WHERE started<?",(stamp-900,))
+                db.execute("INSERT INTO auth_limits VALUES(?,?,1) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1",(bucket,stamp))
+                db.commit()
+                if db.execute("SELECT attempts FROM auth_limits WHERE bucket=?",(bucket,)).fetchone()[0]>5:
+                    return self.send(429,{"error":"Too many requests. Please try again in 15 minutes."})
+                request_id=db.execute("INSERT INTO legal_requests(email,category,message,created_at) VALUES(?,?,?,?)",(email,category,message,now())).lastrowid
+                return self.send(201,{"request_id":request_id,"message":"Request recorded for the platform administrator. Save your reference number. No confirmation email is sent automatically."})
             if path[0] == "auth":
                 return self.account_routes(db, method, path)
             if path[0] == "platform":
                 platform = self.platform_principal(db)
                 if not platform: return self.send(401, {"error": "Platform administrator key required"})
+                if path == ["platform","legal-requests"] and method == "GET":
+                    return self.send(200,[dict(r) for r in db.execute("SELECT * FROM legal_requests ORDER BY id DESC LIMIT 500")])
+                if len(path)==4 and path[1]=="legal-requests" and path[3]=="resolve" and method=="POST":
+                    changed=db.execute("UPDATE legal_requests SET resolved_at=? WHERE id=? AND resolved_at IS NULL",(now(),int(path[2])))
+                    if not changed.rowcount:return self.send(404,{"error":"Open request not found"})
+                    db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)",(platform["id"],"resolve_legal_request",path[2],now()))
+                    return self.send(200,{"resolved":True})
                 if path == ["platform", "vpn-zones"] and method == "GET":
                     return self.send(200, [{"id":z["id"],"name":z.get("name",z["id"]),"tenant_ids":z["tenant_ids"],"enabled":z.get("enabled",True),"allowed_ports":z["allowed_ports"],"allowed_cidrs":z["allowed_cidrs"]} for z in vpn_zones()])
                 if path == ["platform", "accounts"] and method == "GET":
@@ -475,7 +533,7 @@ class Handler(BaseHTTPRequestHandler):
                         if type(value) is not bool: raise ValueError("Choose registration open or closed")
                         db.execute("UPDATE account_settings SET registration_open=? WHERE id=1", (int(value),))
                         db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],"registration_setting",str(value),now()))
-                    return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0])})
+                    return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0]), "policy_version":POLICY_VERSION})
                 if len(path)==4 and path[1]=="accounts" and path[3] in ("approve","reject","suspend","activate") and method=="POST":
                     db.execute("BEGIN IMMEDIATE")
                     account = db.execute("SELECT * FROM accounts WHERE id=?", (int(path[2]),)).fetchone()
@@ -991,6 +1049,8 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "bootstrap":
         bootstrap(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == "promote-admin":
+        promote_platform_account(sys.argv[2])
     elif len(sys.argv) == 2 and sys.argv[1] == "bootstrap-platform":
         bootstrap_platform()
     elif len(sys.argv) == 2 and sys.argv[1] == "serve":
@@ -999,4 +1059,4 @@ if __name__ == "__main__":
         print(f"Listening at http://{HOST}:{PORT}")
         ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
     else:
-        raise SystemExit("Usage: python app.py bootstrap TENANT_NAME | bootstrap-platform | serve")
+        raise SystemExit("Usage: python app.py bootstrap TENANT_NAME | bootstrap-platform | promote-admin EMAIL | serve")

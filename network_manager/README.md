@@ -1,3 +1,18 @@
+## Legal pages and account promotion
+
+Public `/terms`, `/privacy`, `/copyright` and `/contact` pages are linked in the console footer. The legal copy identifies Olamide Bello as this deployment's operator and owner of protectable operator-owned materials, without asserting registration or ownership of third-party components. The privacy wording reflects current accounts, telemetry, logs, shared server infrastructure, VPN checks, and manual retention. It makes no unsupported email-verification, automatic-deletion, GDPR-certification or anonymity promise. Operators should review the published identity and practices when changing the service.
+
+New registration requires `terms_accepted: true` and `policy_version: "2026-10-16"`; the server records version and acceptance time for newly created accounts. This does not fabricate acceptance for existing users or silently bind them to revised terms. Public contact requests are stored for manual super-admin review under **Privacy and legal requests**. No email is sent automatically. Requests are unverified; verify the requester before disclosing or deleting data. Do not publish request messages or treat a submitted email as proof of identity.
+
+To grant an existing registered email platform super-admin privileges, run as root on the deployment host:
+
+```bash
+NETWIZZARD_DB=/var/lib/netwizzard/netwizzard.sqlite3 \
+  python3 /opt/netwizzard-app/app.py promote-admin dobcalldemo@gmail.com
+```
+
+The command requires an existing account, preserves its password, invalidates password/VPN sessions, records the promotion and changes the password account to the platform role. The user must sign in again. The old tenant principal record is retained so existing device/job references and tenant administration are not destroyed; previously issued tenant API keys remain separate tenant credentials and can be revoked using tenant administration. Running the promotion again does not create duplicate platform administrators. No public API exposes this command.
+
 ## Session VPN
 
 The **Session VPN** tab lets tenant users choose their computer's existing VPN for browser access or an assigned platform zone for interactive device TCP checks. Platform-zone sessions expire after 90 seconds without heartbeat, have a one-hour absolute maximum, and disconnect on sign-out. Only the tab's device connectivity checks use the VPN zone; other actions and scheduled jobs keep their existing routing. No VPN keys are uploaded through the GUI. Super admins can view zone assignments. See [VPN setup and Ansible deployment](../deployment/vpn/README.md) for actual WireGuard peer requirements, provisioning and limitations.

@@ -34,7 +34,7 @@
         <label>Password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
         <label>Confirm password<input name="confirm_password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
         <p class="small">Use at least 12 characters. Registration creates a request for a separate workspace; it never grants access to an existing organization.</p>
-        <button>Request account</button>
+        <label class="policy-agreement"><input name="terms_accepted" type="checkbox" required> <span>I am at least 18, agree to the <a href="/terms" target="_blank" rel="noopener">Terms and Conditions</a>, and acknowledge the <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</span></label><button>Request account</button>
       </form></details>
       <details><summary>Sign in with an administrator key</summary><form id="login-form">
         <label>API key<input id="key" type="password" required autocomplete="off" spellcheck="false"></label>
@@ -62,6 +62,7 @@
       <div id="tenant-list" class="cards"></div>
       <h2>Tenant administrators</h2><div id="platform-admin-list" class="cards"></div>
       <h2>Platform VPN zones</h2><p>Zones and tenant assignments are provisioned using the VPN Ansible playbook. Private keys are never shown here.</p><div id="platform-vpn-zones" class="cards"></div>
+      <h2>Privacy and legal requests</h2><p>Requests are unverified. Review identity and authority before releasing or changing information. Replies are handled manually using the supplied email.</p><button id="legal-inbox-refresh" type="button" class="secondary">Refresh requests</button><div id="legal-inbox" class="cards"></div>
       <h2>Platform activity</h2><div id="platform-audit-list" class="cards"></div>
     </section>
     <section id="workspace" hidden>
@@ -135,7 +136,7 @@
       <section id="activity" class="panel" hidden><div class="section-heading"><div><h2>Activity</h2><p>Recent tenant actions, schedule runs and approvals.</p></div><button id="activity-refresh" type="button" class="secondary">Refresh activity</button></div><div id="activity-list" class="cards"></div></section>
     </section>
   </main>
-  <footer>Netwizzard development console · No remote commands are run by this interface.</footer>
+<footer><p>© 2026 Olamide Bello. Rights reserved in protectable Netwizzard materials, subject to applicable licenses.</p><nav aria-label="Legal"><a href="/terms">Terms and Conditions</a> · <a href="/privacy">Privacy Policy</a> · <a href="/copyright">Copyright</a> · <a href="/contact">Contact and requests</a></nav></footer>
   <script src="/app.js" defer></script>
 </body>
 </html>
