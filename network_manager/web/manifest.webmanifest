@@ -1,0 +1,1 @@
+{"name":"Netwizzard Console","short_name":"Netwizzard","description":"Tenant network operations console","start_url":"/","scope":"/","display":"standalone","background_color":"#f3f7f7","theme_color":"#102b39","icons":[{"src":"/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}]}

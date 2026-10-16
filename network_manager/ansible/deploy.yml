@@ -1,0 +1,21 @@
+---
+- name: Apply approved baseline to managed Debian hosts
+  hosts: all
+  gather_facts: true
+  become: true
+  serial: 1
+  any_errors_fatal: true
+  tasks:
+    - name: Require Debian family
+      ansible.builtin.assert:
+        that: ansible_os_family == 'Debian'
+        fail_msg: This baseline only supports Debian family hosts.
+    - name: Install baseline utilities
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - python3
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
