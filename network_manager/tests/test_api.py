@@ -39,6 +39,103 @@ class ApiTests(unittest.TestCase):
         handler.dispatch(method)
         return handler.result
 
+    def platform_key(self):
+        import hashlib
+        with app.connect() as db:
+            db.execute("INSERT INTO platform_admins(name,key_hash) VALUES('owner',?)", (hashlib.sha256(b'platform').hexdigest(),))
+        return "platform"
+
+    def register(self, email="new@example.com"):
+        return self.call("POST", "/auth/register", key="", data={"email":email,"name":"New user","tenant_name":"New workspace","password":"long-test-password","role":"super_admin","principal_id":1})
+
+    def login(self, email="new@example.com", password="long-test-password"):
+        return self.call("POST", "/auth/login", key="", data={"email":email,"password":password})
+
+    def test_registration_approval_and_isolated_password_login(self):
+        platform = self.platform_key()
+        self.assertEqual(self.register()[0], 202)
+        self.assertEqual(self.login()[0], 403)
+        self.assertEqual(self.call("POST", "/platform/accounts/1/approve", data={})[0], 401)
+        self.assertEqual(self.call("POST", "/platform/accounts/1/approve", key=platform, data={})[0], 200)
+        status, result = self.login()
+        self.assertEqual(status,200)
+        token=result["token"]
+        me=self.call("GET","/me",key=token)[1]
+        self.assertEqual(me["role"],"admin")
+        self.assertEqual(me["tenant"],"New workspace")
+        self.assertEqual(self.call("GET","/devices",key=token)[1],[])
+        self.assertEqual(self.call("GET","/platform/accounts",key=token)[0],401)
+        with app.connect() as db:
+            account=db.execute("SELECT * FROM accounts").fetchone()
+            self.assertNotIn("long-test-password",account["password_hash"])
+            self.assertIsNone(account["platform_id"])
+            self.assertNotEqual(db.execute("SELECT token_hash FROM account_sessions").fetchone()[0],token)
+        self.assertEqual(self.call("POST","/auth/logout",key=token,data={})[0],200)
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+
+    def test_password_enrollment_platform_login_and_key_rotation(self):
+        platform=self.platform_key()
+        self.assertEqual(self.call("POST","/auth/enroll",key=platform,data={"email":"owner@example.com","password":"long-test-password"})[0],201)
+        token=self.login("owner@example.com")[1]["token"]
+        self.assertEqual(self.call("GET","/platform/me",key=token)[0],200)
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+        rotated=self.call("POST","/auth/rotate-key",key=token,data={})[1]["api_key"]
+        self.assertEqual(self.call("GET","/platform/me",key=platform)[0],401)
+        self.assertEqual(self.call("GET","/platform/me",key=rotated)[0],200)
+        self.assertEqual(self.call("GET","/platform/me",key=token)[0],200)
+
+    def test_password_change_and_expiry_revoke_sessions(self):
+        self.call("POST","/auth/enroll",data={"email":"admin@example.com","password":"long-test-password"})
+        first=self.login("admin@example.com")[1]["token"]
+        second=self.login("admin@example.com")[1]["token"]
+        self.assertEqual(self.call("POST","/auth/password",key=first,data={"current_password":"wrong","password":"changed-test-password"})[0],403)
+        self.assertEqual(self.call("POST","/auth/password",key=first,data={"current_password":"long-test-password","password":"changed-test-password"})[0],200)
+        self.assertEqual(self.call("GET","/me",key=second)[0],401)
+        self.assertEqual(self.login("admin@example.com")[0],401)
+        token=self.login("admin@example.com","changed-test-password")[1]["token"]
+        with app.connect() as db: db.execute("UPDATE account_sessions SET expires_at=0")
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+
+    def test_registration_settings_validation_and_throttling(self):
+        platform=self.platform_key()
+        self.assertEqual(self.call("POST","/auth/register",key="",data={"email":"invalid"})[0],400)
+        self.assertEqual(self.call("POST","/platform/settings",key=platform,data={"registration_open":False})[0],200)
+        self.assertEqual(self.register()[0],403)
+        self.call("POST","/platform/settings",key=platform,data={"registration_open":True})
+        for _ in range(10): self.login("missing@example.com", "wrong")
+        self.assertEqual(self.login("missing@example.com","wrong")[0],429)
+
+    def test_suspend_reactivate_reject_and_duplicate_approval(self):
+        platform=self.platform_key()
+        self.register()
+        self.call("POST","/platform/accounts/1/approve",key=platform,data={})
+        self.assertEqual(self.call("POST","/platform/accounts/1/approve",key=platform,data={})[0],409)
+        token=self.login()[1]["token"]
+        self.call("POST","/platform/accounts/1/suspend",key=platform,data={})
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+        self.assertEqual(self.login()[0],403)
+        self.call("POST","/platform/accounts/1/activate",key=platform,data={})
+        self.assertEqual(self.login()[0],200)
+        self.register("reject@example.com")
+        self.call("POST","/platform/accounts/2/reject",key=platform,data={})
+        self.assertEqual(self.login("reject@example.com")[0],403)
+
+    def test_key_recovery_is_bound_to_original_user(self):
+        self.call("POST","/auth/enroll",data={"email":"recover@example.com","password":"long-test-password"})
+        token=self.login("recover@example.com")[1]["token"]
+        self.assertEqual(self.call("POST","/auth/enroll",key="b",data={"email":"recover@example.com","password":"different-password"})[0],409)
+        self.assertEqual(self.call("POST","/auth/enroll",key="a",data={"email":"recover@example.com","password":"different-password"})[0],200)
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+        self.assertEqual(self.login("recover@example.com","different-password")[0],200)
+
+    def test_revoked_tenant_user_cannot_use_password_login(self):
+        self.call("POST","/auth/enroll",key="c",data={"email":"second@example.com","password":"long-test-password"})
+        token=self.login("second@example.com")[1]["token"]
+        self.assertEqual(self.call("GET","/me",key=token)[0],200)
+        self.call("POST","/users/2/revoke",data={})
+        self.assertEqual(self.call("GET","/me",key=token)[0],401)
+        self.assertEqual(self.login("second@example.com")[0],403)
+
     def test_tenant_scope_for_devices_and_links(self):
         _, a = self.call("POST", "/devices", data={"name": "a", "address": "192.0.2.1", "kind": "router"})
         _, b = self.call("POST", "/devices", key="b", data={"name": "b", "address": "192.0.2.2", "kind": "router"})

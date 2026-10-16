@@ -7,6 +7,8 @@ import os
 import secrets
 import sqlite3
 import sys
+import re
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -26,6 +28,11 @@ PORT = int(os.environ.get("NETWIZZARD_PORT", "8080"))
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','active','suspended','rejected')), tenant_name TEXT NOT NULL DEFAULT '', principal_id INTEGER UNIQUE REFERENCES principals(id), platform_id INTEGER UNIQUE REFERENCES platform_admins(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS account_sessions(token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), expires_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS auth_limits(bucket TEXT PRIMARY KEY, started REAL NOT NULL, attempts INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS account_settings(id INTEGER PRIMARY KEY CHECK(id=1), registration_open INTEGER NOT NULL DEFAULT 1);
+INSERT OR IGNORE INTO account_settings(id) VALUES(1);
 CREATE TABLE IF NOT EXISTS platform_admins(id INTEGER PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, active INTEGER NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS platform_audit(id INTEGER PRIMARY KEY, platform_admin_id INTEGER NOT NULL REFERENCES platform_admins(id), action TEXT NOT NULL, target TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS principals(id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('admin','operator','viewer')), key_hash TEXT NOT NULL UNIQUE);
@@ -146,6 +153,29 @@ def validate_device_metadata(db, tenant, data):
     return owner, ref
 
 
+def password_hash(password):
+    if not isinstance(password, str) or not 12 <= len(password) <= 128:
+        raise ValueError("Use a password of 12 to 128 characters")
+    salt = secrets.token_hex(16)
+    digest = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
+    return salt + ":" + digest
+
+
+def password_matches(password, encoded):
+    if not isinstance(password, str) or len(password) > 128:
+        return False
+    salt, expected = encoded.split(":")
+    actual = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()
+    return hmac.compare_digest(actual, expected)
+
+
+def account_email(value):
+    value = str(value).strip().lower()
+    if len(value) > 254 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+        raise ValueError("Enter a valid email address")
+    return value
+
+
 def bootstrap(name):
     key = secrets.token_urlsafe(32)
     with connect() as db:
@@ -206,11 +236,111 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             return None
         digest = hashlib.sha256(key.encode()).hexdigest()
+        account = self.session_account(db)
+        if account and account["principal_id"]:
+            return db.execute("SELECT * FROM principals WHERE id=? AND active=1", (account["principal_id"],)).fetchone()
         # Compare fixed-size hashes rather than raw tokens.
         for row in db.execute("SELECT * FROM principals WHERE active=1"):
             if hmac.compare_digest(row["key_hash"], digest):
                 return row
         return None
+
+    def token_hash(self):
+        token = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        return hashlib.sha256(token.encode()).hexdigest()
+
+    def session_account(self, db):
+        return db.execute("SELECT a.* FROM accounts a JOIN account_sessions s ON s.account_id=a.id WHERE s.token_hash=? AND s.expires_at>? AND a.status='active'", (self.token_hash(), time.time())).fetchone()
+
+    def platform_principal(self, db):
+        account = self.session_account(db)
+        if account and account["platform_id"]:
+            return db.execute("SELECT id,name FROM platform_admins WHERE id=? AND active=1", (account["platform_id"],)).fetchone()
+        return db.execute("SELECT id,name FROM platform_admins WHERE key_hash=? AND active=1", (self.token_hash(),)).fetchone()
+
+    def account_routes(self, db, method, path):
+        if path == ["auth", "config"] and method == "GET":
+            return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0])})
+        if path in (["auth", "register"], ["auth", "login"]) and method == "POST":
+            data = self.body()
+            email = account_email(data.get("email", ""))
+            # Use the real TCP peer, never a client-supplied forwarding header.
+            peer = getattr(self, "client_address", ("local",))[0]
+            bucket = hashlib.sha256((peer + ":" + path[1] + ":" + (email if path[1] == "login" else "all")).encode()).hexdigest()
+            stamp = time.time()
+            db.execute("DELETE FROM auth_limits WHERE started<?", (stamp-900,))
+            db.execute("DELETE FROM account_sessions WHERE expires_at<?", (stamp,))
+            db.execute("INSERT INTO auth_limits VALUES(?,?,1) ON CONFLICT(bucket) DO UPDATE SET attempts=attempts+1", (bucket,stamp))
+            attempts = db.execute("SELECT attempts FROM auth_limits WHERE bucket=?", (bucket,)).fetchone()[0]
+            db.commit()
+            if attempts > 10:
+                return self.send(429, {"error":"Too many attempts. Try again in 15 minutes."})
+            if path[1] == "register":
+                if not db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0]:
+                    return self.send(403, {"error":"Registration is currently closed"})
+                name, tenant_name = (str(data.get(k, "")).strip() for k in ("name", "tenant_name"))
+                if not name or len(name)>100 or not tenant_name or len(tenant_name)>100:
+                    raise ValueError("Enter your name and workspace name (up to 100 characters each)")
+                encoded = password_hash(data.get("password"))
+                db.execute("INSERT OR IGNORE INTO accounts(email,name,password_hash,status,tenant_name,created_at) VALUES(?,?,?,'pending',?,?)", (email,name,encoded,tenant_name,now()))
+                return self.send(202, {"message":"Registration received. A platform administrator must approve a new request before you can sign in. If you already have an account, use Sign in."})
+            account = db.execute("SELECT * FROM accounts WHERE email=?", (email,)).fetchone()
+            # A fixed dummy scrypt hash makes unknown-account verification comparable.
+            encoded = account["password_hash"] if account else "00"*16 + ":" + "00"*64
+            if not password_matches(data.get("password"), encoded):
+                return self.send(401, {"error":"Invalid email or password"})
+            if account["status"] != "active":
+                return self.send(403, {"error":"Account is " + account["status"] + ". Contact your platform administrator."})
+            if account["principal_id"] and not db.execute("SELECT 1 FROM principals WHERE id=? AND active=1", (account["principal_id"],)).fetchone():
+                return self.send(403, {"error":"User access has been revoked"})
+            if account["platform_id"] and not db.execute("SELECT 1 FROM platform_admins WHERE id=? AND active=1", (account["platform_id"],)).fetchone():
+                return self.send(403, {"error":"Administrator access has been revoked"})
+            token = secrets.token_urlsafe(32)
+            db.execute("INSERT INTO account_sessions VALUES(?,?,?)", (hashlib.sha256(token.encode()).hexdigest(),account["id"],stamp+28800))
+            return self.send(200, {"token":token,"expires_in":28800})
+        if path == ["auth", "logout"] and method == "POST":
+            db.execute("DELETE FROM account_sessions WHERE token_hash=?", (self.token_hash(),))
+            return self.send(200, {"message":"Signed out"})
+        account = self.session_account(db)
+        principal = self.principal(db)
+        platform = self.platform_principal(db)
+        if not principal and not platform:
+            return self.send(401, {"error":"Authentication required"})
+        if path == ["auth", "me"] and method == "GET":
+            return self.send(200, {"name": account["name"] if account else (platform or principal)["name"], "email":account["email"] if account else None, "account_login":bool(account), "role":"super_admin" if platform else principal["role"], "session_hours":8})
+        if path == ["auth", "enroll"] and method == "POST":
+            data = self.body()
+            email = account_email(data.get("email", ""))
+            encoded = password_hash(data.get("password"))
+            if account:
+                return self.send(409, {"error":"This session already has a password account"})
+            # A valid legacy key can recover only its own existing email account.
+            existing = db.execute("SELECT * FROM accounts WHERE email=?", (email,)).fetchone()
+            if existing:
+                same_owner = (platform and existing["platform_id"] == platform["id"]) or (principal and existing["principal_id"] == principal["id"])
+                if not same_owner:
+                    return self.send(409, {"error":"Email is already registered to another account"})
+                db.execute("UPDATE accounts SET password_hash=? WHERE id=?", (encoded,existing["id"]))
+                db.execute("DELETE FROM account_sessions WHERE account_id=?", (existing["id"],))
+                return self.send(200, {"message":"Password reset using your API key. Previous password sessions have been signed out."})
+            # Enrollment requires an existing administrator-issued API key.
+            db.execute("INSERT INTO accounts(email,name,password_hash,status,principal_id,platform_id,created_at) VALUES(?,?,?,'active',?,?,?)", (email,(platform or principal)["name"],encoded,principal["id"] if principal else None,platform["id"] if platform else None,now()))
+            return self.send(201, {"message":"Password login enabled. Sign out and sign in with your email and password."})
+        if path == ["auth", "password"] and method == "POST":
+            data = self.body()
+            if not account or not password_matches(data.get("current_password"), account["password_hash"]):
+                return self.send(403, {"error":"Current password is required for a password account"})
+            encoded = password_hash(data.get("password"))
+            db.execute("UPDATE accounts SET password_hash=? WHERE id=?", (encoded,account["id"]))
+            db.execute("DELETE FROM account_sessions WHERE account_id=?", (account["id"],))
+            return self.send(200, {"message":"Password changed. All sessions signed out."})
+        if path == ["auth", "rotate-key"] and method == "POST":
+            token = secrets.token_urlsafe(32)
+            table = "platform_admins" if platform else "principals"
+            identity = (platform or principal)["id"]
+            db.execute(f"UPDATE {table} SET key_hash=? WHERE id=?", (hashlib.sha256(token.encode()).hexdigest(),identity))
+            return self.send(200, {"api_key":token})
+        return self.send(404, {"error":"Not found"})
 
     def audit(self, db, user, action, target):
         db.execute("INSERT INTO audit(tenant_id,principal_id,action,target,created_at) VALUES(?,?,?,?,?)",
@@ -221,11 +351,41 @@ class Handler(BaseHTTPRequestHandler):
         if path == ["health"]:
             return self.send(200, {"status": "ok"})
         with connect() as db:
+            if path[0] == "auth":
+                return self.account_routes(db, method, path)
             if path[0] == "platform":
-                token = self.headers.get("Authorization", "").removeprefix("Bearer ")
-                digest = hashlib.sha256(token.encode()).hexdigest()
-                platform = db.execute("SELECT id,name FROM platform_admins WHERE key_hash=? AND active=1", (digest,)).fetchone() if token else None
+                platform = self.platform_principal(db)
                 if not platform: return self.send(401, {"error": "Platform administrator key required"})
+                if path == ["platform", "accounts"] and method == "GET":
+                    return self.send(200, [dict(r) for r in db.execute("SELECT id,email,name,status,tenant_name,principal_id,platform_id,created_at FROM accounts ORDER BY id DESC LIMIT 1000")])
+                if path == ["platform", "settings"] and method in ("GET", "POST"):
+                    if method == "POST":
+                        value = self.body().get("registration_open")
+                        if type(value) is not bool: raise ValueError("Choose registration open or closed")
+                        db.execute("UPDATE account_settings SET registration_open=? WHERE id=1", (int(value),))
+                        db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],"registration_setting",str(value),now()))
+                    return self.send(200, {"registration_open":bool(db.execute("SELECT registration_open FROM account_settings WHERE id=1").fetchone()[0])})
+                if len(path)==4 and path[1]=="accounts" and path[3] in ("approve","reject","suspend","activate") and method=="POST":
+                    db.execute("BEGIN IMMEDIATE")
+                    account = db.execute("SELECT * FROM accounts WHERE id=?", (int(path[2]),)).fetchone()
+                    if not account: return self.send(404, {"error":"Account not found"})
+                    if account["platform_id"]: return self.send(403, {"error":"Platform administrator accounts cannot be changed here"})
+                    action = path[3]
+                    if action in ("approve","reject") and account["status"] != "pending":
+                        return self.send(409, {"error":"Only pending registrations can be approved or rejected"})
+                    if action in ("suspend","activate") and account["status"] not in ("active","suspended"):
+                        return self.send(409, {"error":"Account must already be approved"})
+                    if action == "approve":
+                        tid = db.execute("INSERT INTO tenants(name) VALUES(?)", (account["tenant_name"],)).lastrowid
+                        pid = db.execute("INSERT INTO principals(tenant_id,name,role,key_hash) VALUES(?,?,'admin',?)", (tid,account["name"],hashlib.sha256(secrets.token_bytes(32)).hexdigest())).lastrowid
+                        db.execute("UPDATE accounts SET principal_id=? WHERE id=?", (pid,account["id"]))
+                    status = {"approve":"active","reject":"rejected","suspend":"suspended","activate":"active"}[action]
+                    db.execute("UPDATE accounts SET status=? WHERE id=?", (status,account["id"]))
+                    if account["principal_id"]:
+                        db.execute("UPDATE principals SET active=? WHERE id=?", (int(status=="active"),account["principal_id"]))
+                    db.execute("DELETE FROM account_sessions WHERE account_id=?", (account["id"],))
+                    db.execute("INSERT INTO platform_audit(platform_admin_id,action,target,created_at) VALUES(?,?,?,?)", (platform["id"],action+"_account",str(account["id"]),now()))
+                    return self.send(200, {"status":status})
                 if path == ["platform", "me"] and method == "GET":
                     return self.send(200, {"id":platform["id"], "name":platform["name"], "role":"super_admin"})
                 if path == ["platform", "tenants"] and method == "GET":

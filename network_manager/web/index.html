@@ -13,21 +13,48 @@
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark">N</span><span>netwizzard <small>console</small></span></div>
-    <div class="account"><span id="identity">Development console</span><button id="lock" class="text-button" hidden>Lock</button></div>
+    <div class="account"><span id="identity">Netwizzard</span><button id="account-open" class="text-button" hidden>My account</button><button id="lock" class="text-button" hidden>Sign out</button></div>
   </header>
   <main>
     <section id="login" class="login-card">
       <div class="eyebrow">Network operations</div>
       <h1>Connect to your workspace</h1>
-      <p>Enter the API key from your tenant administrator. It stays in this browser tab's memory and is cleared when the tab closes.</p>
-      <form id="login-form">
-        <label>API key <input id="key" type="password" required autocomplete="off" spellcheck="false"></label>
-        <button type="submit">Open console</button>
+      <p>Sign in to your workspace or request an account. New workspace registrations need super-admin approval.</p>
+      <div id="auth-notice" role="status" aria-live="polite"></div>
+      <form id="password-login-form">
+        <label>Email<input name="email" type="email" required autocomplete="username" maxlength="254"></label>
+        <label>Password<input name="password" type="password" required autocomplete="current-password" maxlength="128"></label>
+        <button>Sign in</button>
       </form>
-      <p class="small">This development console requires a trusted HTTPS reverse proxy before remote use.</p>
+      <details><summary>Create an account</summary><form id="register-form">
+        <label>Your name<input name="name" required maxlength="100" autocomplete="name"></label>
+        <label>Workspace / organization<input name="tenant_name" required maxlength="100" autocomplete="organization"></label>
+        <label>Email<input name="email" type="email" required maxlength="254" autocomplete="email"></label>
+        <label>Password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
+        <label>Confirm password<input name="confirm_password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>
+        <p class="small">Use at least 12 characters. Registration creates a request for a separate workspace; it never grants access to an existing organization.</p>
+        <button>Request account</button>
+      </form></details>
+      <details><summary>Sign in with an administrator key</summary><form id="login-form">
+        <label>API key<input id="key" type="password" required autocomplete="off" spellcheck="false"></label>
+        <button>Open console</button>
+      </form></details>
+      <details><summary>Need access or forgot your password?</summary><p>Sign in with your existing API key, open My account and enter your existing email with a new password to reset it. If your key is lost, ask your workspace administrator for a replacement account. Platform administrators can recover access using their protected server key. Automated email recovery is not configured.</p></details>
+      <p class="small">Sessions last up to 8 hours and stay in this tab only. Use HTTPS and sign out on shared devices.</p>
+    </section>
+    <section id="account-panel" class="panel" hidden>
+      <h2>My account</h2><p id="account-summary"></p><div id="account-notice" role="status" aria-live="polite"></div>
+      <div class="forms automation-forms">
+        <form id="enroll-form" class="form-card"><h3>Enable or recover password login</h3><p>Use your administrator-issued key once, then sign in with email and password.</p><label>Email<input name="email" type="email" required maxlength="254" autocomplete="email"></label><label>Password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label><button>Enable password login</button></form>
+        <form id="change-password-form" class="form-card"><h3>Change password</h3><label>Current password<input name="current_password" type="password" required autocomplete="current-password"></label><label>New password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label><button>Change password and sign out</button></form>
+        <div class="form-card"><h3>Replace API key</h3><p>Immediately invalidates your old API key. Save the new key privately; it is shown once.</p><button id="rotate-key" type="button">Replace API key</button><code id="rotated-key" hidden></code><button id="hide-rotated-key" type="button" class="secondary" hidden>Hide key</button></div>
+      </div><button id="account-close" type="button" class="secondary">Close account settings</button>
     </section>
     <section id="platform" class="panel" hidden>
-      <div class="hero"><div><div class="eyebrow">Platform administration</div><h1>Tenants</h1><p>Create tenant workspaces and issue one-time administrator keys.</p></div></div>
+      <div class="hero"><div><div class="eyebrow">Platform administration</div><h1>Super admin dashboard</h1><p>Approve registrations, manage accounts and tenant workspaces, and review platform activity.</p></div></div>
+      <div id="platform-metrics" class="metrics"></div>
+      <div class="form-card"><h2>Registration settings</h2><label><input id="registration-open" type="checkbox"> Accept new workspace registrations (approval required)</label><button id="save-registration" type="button">Save setting</button></div>
+      <h2>Accounts and registration requests</h2><label>Search accounts<input id="account-search" type="search" placeholder="Name, email, workspace or status"></label><button id="accounts-refresh" type="button" class="secondary">Refresh accounts</button><div id="account-list" class="cards"></div>
       <div id="platform-notice" role="status"></div>
       <div class="forms"><form id="tenant-form" class="form-card"><h2>Create tenant</h2><label>Tenant name<input name="name" required maxlength="100"></label><label>First admin name<input name="admin_name" required maxlength="100"></label><button>Create tenant</button></form><form id="tenant-admin-form" class="form-card"><h2>Add tenant admin</h2><label>Tenant<select name="tenant_id" required></select></label><label>Admin name<input name="name" required maxlength="100"></label><button>Add admin</button></form></div>
       <div id="platform-key" class="form-card" hidden><h3>One-time tenant admin key</h3><code></code><button id="platform-key-hide" type="button" class="secondary">Hide key</button></div>

@@ -28,8 +28,33 @@
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
   }
+  let accounts = [];
+  function renderAccounts() {
+    const list = $('#account-list'); list.replaceChildren();
+    const query = $('#account-search').value.toLowerCase();
+    accounts.filter((a) => `${a.name} ${a.email} ${a.tenant_name} ${a.status}`.toLowerCase().includes(query)).forEach((a) => {
+      const actions = node('div', 'toolbar');
+      const choices = a.platform_id ? [] : a.status === 'pending' ? ['approve','reject'] : a.status === 'active' ? ['suspend'] : a.status === 'suspended' ? ['activate'] : [];
+      choices.forEach((action) => {
+        const button = node('button', 'secondary', action[0].toUpperCase()+action.slice(1)); button.type='button';
+        button.addEventListener('click', async () => {
+          if (!confirm(`${action} account for ${a.email}?`)) return;
+          button.disabled=true;
+          try { await api(`/platform/accounts/${a.id}/${action}`, {method:'POST'}); await refreshPlatform(); $('#platform-notice').textContent='Account updated.'; }
+          catch (error) { $('#platform-notice').textContent=error.message; button.disabled=false; }
+        }); actions.append(button);
+      });
+      card(list, a.name, `${a.email} · ${a.tenant_name || 'Existing workspace'} · ${new Date(a.created_at).toLocaleDateString()}`, a.status, actions);
+    });
+    if (!list.children.length) empty(list, 'No accounts match your search.');
+  }
   async function refreshPlatform() {
+    accounts = await api('/platform/accounts');
+    renderAccounts();
+    $('#registration-open').checked = (await api('/platform/settings')).registration_open;
     const tenants = await api('/platform/tenants');
+    const metrics = $('#platform-metrics'); metrics.replaceChildren();
+    [['Workspaces',tenants.length],['Accounts',accounts.length],['Pending approvals',accounts.filter(a=>a.status==='pending').length],['Active accounts',accounts.filter(a=>a.status==='active').length]].forEach(([label,count])=>{const box=node('div','metric');box.append(node('b','',count),node('span','',label));metrics.append(box);});
     const list = $('#tenant-list'); list.replaceChildren();
     tenants.forEach((item) => card(list, item.name, `Tenant #${item.id} · ${item.users} users`, 'tenant'));
     options($('#tenant-admin-form select[name="tenant_id"]'), tenants, 'Select tenant');
@@ -318,7 +343,7 @@
     data.schedule_runs.forEach((entry) => card(activity, `Schedule #${entry.schedule_id} ran`, `${entry.job_count} jobs queued · ${new Date(entry.created_at).toLocaleString()}`));
     if (!data.audit.length && !data.schedule_runs.length) empty(activity, 'No activity recorded yet.');
     $('#approve-selected').disabled = me.role !== 'admin';
-    document.querySelectorAll('.form-card button').forEach((button) => { button.disabled = me.role === 'viewer'; });
+    document.querySelectorAll('#workspace .form-card button').forEach((button) => { button.disabled = me.role === 'viewer'; });
     $('#rule-form button').disabled = me.role !== 'admin';
     $('#schedule-form button').disabled = me.role !== 'admin';
     $('#user-form button').disabled = me.role !== 'admin';
@@ -337,9 +362,45 @@
     collections.forEach((name, index) => { data[name] = results[index]; });
     render();
   }
-  $('#login-form').addEventListener('submit', async (event) => {
-    event.preventDefault();
-    key = $('#key').value.trim();
+  async function publicAuth(path, body) {
+    const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
+    const result=await response.json(); if(!response.ok) throw new Error(result.error || 'Request failed'); return result;
+  }
+  $('#password-login-form').addEventListener('submit', async event=>{
+    event.preventDefault(); const form=event.currentTarget; const button=form.querySelector('button');button.disabled=true;
+    try {const result=await publicAuth('/auth/login',Object.fromEntries(new FormData(form))); key=result.token; form.reset(); await openConsole();}
+    catch(error){$('#auth-notice').textContent=error.message;}finally{button.disabled=false;}
+  });
+  $('#register-form').addEventListener('submit', async event=>{
+    event.preventDefault();const form=event.currentTarget;const values=Object.fromEntries(new FormData(form));
+    if(values.password!==values.confirm_password){$('#auth-notice').textContent='Passwords do not match.';return;}
+    delete values.confirm_password;const button=form.querySelector('button');button.disabled=true;
+    try{const result=await publicAuth('/auth/register',values);form.reset();$('#auth-notice').textContent=result.message;}
+    catch(error){$('#auth-notice').textContent=error.message;}finally{button.disabled=false;}
+  });
+  $('#account-open').addEventListener('click',async()=>{
+    try{const a=await api('/auth/me');$('#account-summary').textContent=`${a.name} · ${a.role}${a.email?' · '+a.email:''}`;$('#enroll-form').hidden=a.account_login;$('#change-password-form').hidden=!a.account_login;$('#account-panel').hidden=false;$('#account-notice').textContent='';$('#account-panel').scrollIntoView({behavior:'smooth'});}
+    catch(error){notice(error.message,true);}
+  });
+  $('#account-close').addEventListener('click',()=>{$('#account-panel').hidden=true;$('#rotated-key').textContent='';$('#rotated-key').hidden=true;$('#hide-rotated-key').hidden=true;});
+  for(const [id,path] of [['enroll-form','enroll'],['change-password-form','password']]){
+    $('#'+id).addEventListener('submit',async event=>{
+      event.preventDefault();const form=event.currentTarget;const button=form.querySelector('button');button.disabled=true;
+      try{const result=await api('/auth/'+path,{method:'POST',body:Object.fromEntries(new FormData(form))});form.reset();if(path==='password'){$('#lock').click();$('#auth-notice').textContent=result.message;}else{$('#account-notice').textContent=result.message;form.hidden=true;}}
+      catch(error){$('#account-notice').textContent=error.message;}finally{button.disabled=false;}
+    });
+  }
+  $('#rotate-key').addEventListener('click',async()=>{
+    if(!confirm('Replace your API key now? The old key will stop working.'))return;
+    try{const result=await api('/auth/rotate-key',{method:'POST'});const account=await api('/auth/me').catch(()=>null);if(!account)key=result.api_key;$('#rotated-key').textContent=result.api_key;$('#rotated-key').hidden=false;$('#hide-rotated-key').hidden=false;$('#account-notice').textContent='Save this key privately. Your old API key is invalid.';}
+    catch(error){$('#account-notice').textContent=error.message;}
+  });
+  $('#hide-rotated-key').addEventListener('click',()=>{$('#rotated-key').textContent='';$('#rotated-key').hidden=true;$('#hide-rotated-key').hidden=true;});
+  $('#account-search').addEventListener('input',renderAccounts);
+  $('#accounts-refresh').addEventListener('click',()=>refreshPlatform().catch(e=>{$('#platform-notice').textContent=e.message;}));
+  $('#save-registration').addEventListener('click',async()=>{try{await api('/platform/settings',{method:'POST',body:{registration_open:$('#registration-open').checked}});$('#platform-notice').textContent='Registration settings saved.';}catch(e){$('#platform-notice').textContent=e.message;}});
+  fetch('/auth/config').then(r=>r.json()).then(c=>{if(!c.registration_open){$('#register-form').hidden=true;$('#auth-notice').textContent='Registration is currently closed. Contact your administrator for access.';}}).catch(()=>{});
+  async function openConsole() {
     try {
       try { me = await api('/me'); }
       catch (error) {
@@ -347,7 +408,7 @@
         me = await api('/platform/me');
         await refreshPlatform();
         $('#login').hidden = true; $('#platform').hidden = false; $('#lock').hidden = false;
-        $('#identity').textContent = 'Platform administrator'; $('#key').value = '';
+        $('#identity').textContent = 'Super administrator'; $('#key').value = ''; $('#account-open').hidden=false;
         return;
       }
       const prefs = await api('/preferences');
@@ -359,14 +420,22 @@
       $('#identity').textContent = `${me.name} · ${me.role}`;
       $('#login').hidden = true;
       $('#workspace').hidden = false;
-      $('#lock').hidden = false;
+      $('#lock').hidden = false; $('#account-open').hidden=false;
       setAutoRefresh();
       notice('Connected to your tenant workspace.');
-    } catch (error) { key = ''; alert(error.message); }
+    } catch (error) { key = ''; throw error; }
+  }
+  $('#login-form').addEventListener('submit', async (event) => {
+    event.preventDefault(); key=$('#key').value.trim();
+    try { await openConsole(); } catch(error) { $('#auth-notice').textContent=error.message; }
   });
   $('#lock').addEventListener('click', () => {
     if (refreshTimer) clearInterval(refreshTimer);
-    key = ''; me = null;
+    if (key) api('/auth/logout', {method:'POST'}).catch(()=>{});
+    accounts=[]; $('#account-list').replaceChildren();
+    key = ''; me = null; $('#identity').textContent='Netwizzard';
+    $('#account-panel').hidden=true; $('#account-open').hidden=true; $('#rotated-key').textContent=''; $('#rotated-key').hidden=true; $('#hide-rotated-key').hidden=true;
+    document.querySelectorAll('#login input[type=password], #account-panel input[type=password]').forEach(input=>{input.value='';});
     data = {devices: [], groups: [], memberships: [], links: [], events: [], jobs: [], automation_rules: [], schedules: [], users: [], scripts: [], agents: [], telemetry: [], alerts: [], alert_policies: [], config_drafts: [], audit: [], schedule_runs: []};
     $('#generated-key').textContent = ''; $('#one-time-key').hidden = true;
     $('#script-preview').textContent = ''; $('#script-preview').hidden = true;

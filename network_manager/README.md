@@ -1,3 +1,19 @@
+## Account registration and dashboards
+
+The sign-in page supports email/password and existing API keys. New workspace registrations require platform-super-admin approval. Registration never accepts a tenant ID or role supplied by a visitor; approval creates a separate workspace with its first tenant administrator. Existing organization members use an administrator-issued user key to sign in and choose **My account → Enable or recover password login**. This binds their email/password to the same existing role and tenant. They should not register another workspace to join an existing organization.
+
+**Super admin:** Sign in with your existing platform key, open **My account**, and enable email/password login. Subsequent password sign-ins open the Super admin dashboard: workspace and account counts, pending approvals, account search, approve/reject requests, suspend/reactivate tenant accounts, registration open/closed setting, existing tenant/admin management and platform audit. Public registration cannot grant platform administrator access. Account suspension also disables its linked user and invalidates its password sessions; it can suspend a workspace's only administrator, so reactivation remains available to the super admin. API-only users remain in the existing tenant administration controls.
+
+**User GUI:** Email/password sign-in opens the existing role-controlled device, topology, event, alert, telemetry, change-request and automation dashboard. **My account** shows identity and role, allows password changes and API-key replacement. Password changes and key-based password recovery revoke all password sessions. Sign out revokes the current password session; closing the tab clears the token from memory. Password sessions expire after eight hours. No token or password is written to browser storage. API keys remain valid until rotated or the underlying user is revoked.
+
+Passwords require 12–128 characters and use salted scrypt hashes; session tokens are stored only as hashes in SQLite. Authentication attempts are bounded to 10 per email/peer in 15 minutes; registration is bounded to 10 per peer. Behind the supplied reverse proxy the TCP peer is shared, so the registration limit applies across visitors. Client forwarding headers are not trusted for these limits. Registration settings and approval decisions appear in platform audit. Existing administrator keys can reset the password for their own linked email through the enrollment form; they cannot reset another user's email account.
+
+Deploy the update with `git pull --ff-only origin main && bash deployment/install.sh` from `/opt/netwizzard`. Existing Nginx/HTTPS configuration remains in place. The installer backs up an existing database before migration. Rollback of the application can use the previous code; the added account tables are additive. Keep database backups protected because they contain authentication hashes.
+
+Email verification, email password-reset delivery, MFA, OIDC/LDAP and automated invitation email are not configured. New accounts stay pending until manually reviewed; email ownership is not verified. After replacing a platform API key in **My account**, save the replacement securely: the original server bootstrap file is not automatically updated and its old key stops working. This update does not require OpenAI or any external identity service.
+
+---
+
 # Network management foundation
 
 This module starts the network inventory and workflow service requested for Netwizzard. It uses Python 3.11+ standard library and SQLite. It is a **development foundation**, not a production network controller. No live SSH console, remote desktop, identity provider, credential vault, or network scanner is included.
