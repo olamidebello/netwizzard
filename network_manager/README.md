@@ -1,3 +1,16 @@
+## Signup page and feedback
+
+The sign-in screen links directly to `/signup`. This standalone page uses its own small script, validates required fields and password confirmation, shows submission progress, prevents duplicate clicks, displays server errors next to the submit button, and confirms that the request awaits platform approval. It fetches the registration setting and policy version before enabling submission. A retry-settings button appears if that check fails. No registration, email ownership verification or approval is fabricated by the browser.
+
+Optional frontend DOM regression checks (development only, no added production dependency):
+
+```bash
+npm install --prefix /tmp/netwizzard-ui-test --no-audit --no-fund jsdom
+NODE_PATH=/tmp/netwizzard-ui-test/node_modules node network_manager/tests/signup-ui.cjs
+```
+
+The test mocks API responses and does not create real accounts. The standard Python API suite remains the installer's required check. The super-admin CLI test captures its simulated promotion output so it cannot be confused with a live account promotion during installation.
+
 ## Legal pages and account promotion
 
 Public `/terms`, `/privacy`, `/copyright` and `/contact` pages are linked in the console footer. The legal copy identifies Olamide Bello as this deployment's operator and owner of protectable operator-owned materials, without asserting registration or ownership of third-party components. The privacy wording reflects current accounts, telemetry, logs, shared server infrastructure, VPN checks, and manual retention. It makes no unsupported email-verification, automatic-deletion, GDPR-certification or anonymity promise. Operators should review the published identity and practices when changing the service.

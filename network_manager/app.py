@@ -22,6 +22,8 @@ ASSETS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
     "/icon.svg": ("icon.svg", "image/svg+xml"),
+    "/signup": ("signup.html", "text/html; charset=utf-8"),
+    "/signup.js": ("signup.js", "text/javascript; charset=utf-8"),
     "/terms": ("terms.html", "text/html; charset=utf-8"),
     "/privacy": ("privacy.html", "text/html; charset=utf-8"),
     "/copyright": ("copyright.html", "text/html; charset=utf-8"),

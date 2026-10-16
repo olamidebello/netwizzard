@@ -1,10 +1,11 @@
 import importlib.util
+import contextlib
 import json
 import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
-from io import BytesIO
+from io import BytesIO, StringIO
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
 spec = importlib.util.spec_from_file_location("network_manager", os.path.join(ROOT, "app.py"))
@@ -242,7 +243,7 @@ class ApiTests(unittest.TestCase):
         token=self.login("dobcalldemo@gmail.com")[1]["token"]
         with patch.object(app.os,"geteuid",return_value=1000):
             with self.assertRaises(PermissionError):app.promote_platform_account("dobcalldemo@gmail.com")
-        with patch.object(app.os,"geteuid",return_value=0):
+        with patch.object(app.os,"geteuid",return_value=0), contextlib.redirect_stdout(StringIO()):
             app.promote_platform_account("dobcalldemo@gmail.com")
             app.promote_platform_account("dobcalldemo@gmail.com")
             with self.assertRaises(ValueError):app.promote_platform_account("missing@example.com")
@@ -253,7 +254,7 @@ class ApiTests(unittest.TestCase):
         with app.connect() as db:self.assertEqual(db.execute("SELECT count(*) FROM platform_admins").fetchone()[0],1)
 
     def test_legal_pages_are_public_static_assets(self):
-        for route in ("/terms","/privacy","/copyright","/contact","/legal.js"):
+        for route in ("/signup","/signup.js","/terms","/privacy","/copyright","/contact","/legal.js"):
             self.assertIn(route,app.ASSETS)
             self.assertTrue((app.WEB/app.ASSETS[route][0]).is_file())
 

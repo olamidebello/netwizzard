@@ -65,7 +65,6 @@
     try{const result=await api('/vpn/check',{method:'POST',body:{session_id:vpnSession.session_id,device_id:Number(fields.device_id),port:Number(fields.port)}});vpnNotice(`Device TCP port ${result.port} is reachable through ${result.zone}.`);}catch(e){vpnNotice(e.message);}finally{button.disabled=false;}
   });
   window.addEventListener('pagehide',()=>{if(vpnSession&&key)fetch('/vpn/disconnect',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({session_id:vpnSession.session_id}),keepalive:true}).catch(()=>{});});
-  let policyVersion = '2026-10-16';
   let accounts = [];
   function renderAccounts() {
     const list = $('#account-list'); list.replaceChildren();
@@ -421,14 +420,6 @@
     try {const result=await publicAuth('/auth/login',Object.fromEntries(new FormData(form))); key=result.token; form.reset(); await openConsole();}
     catch(error){$('#auth-notice').textContent=error.message;}finally{button.disabled=false;}
   });
-  $('#register-form').addEventListener('submit', async event=>{
-    event.preventDefault();const form=event.currentTarget;const values=Object.fromEntries(new FormData(form));
-    if(values.password!==values.confirm_password){$('#auth-notice').textContent='Passwords do not match.';return;}
-    values.terms_accepted=form.elements.terms_accepted.checked;values.policy_version=policyVersion;
-    delete values.confirm_password;const button=form.querySelector('button');button.disabled=true;
-    try{const result=await publicAuth('/auth/register',values);form.reset();$('#auth-notice').textContent=result.message;}
-    catch(error){$('#auth-notice').textContent=error.message;}finally{button.disabled=false;}
-  });
   $('#account-open').addEventListener('click',async()=>{
     try{const a=await api('/auth/me');$('#account-summary').textContent=`${a.name} · ${a.role}${a.email?' · '+a.email:''}`;$('#enroll-form').hidden=a.account_login;$('#change-password-form').hidden=!a.account_login;$('#account-panel').hidden=false;$('#account-notice').textContent='';$('#account-panel').scrollIntoView({behavior:'smooth'});}
     catch(error){notice(error.message,true);}
@@ -450,7 +441,7 @@
   $('#account-search').addEventListener('input',renderAccounts);
   $('#accounts-refresh').addEventListener('click',()=>refreshPlatform().catch(e=>{$('#platform-notice').textContent=e.message;}));
   $('#save-registration').addEventListener('click',async()=>{try{await api('/platform/settings',{method:'POST',body:{registration_open:$('#registration-open').checked}});$('#platform-notice').textContent='Registration settings saved.';}catch(e){$('#platform-notice').textContent=e.message;}});
-  fetch('/auth/config').then(r=>r.json()).then(c=>{policyVersion=c.policy_version||policyVersion;if(!c.registration_open){$('#register-form').hidden=true;$('#auth-notice').textContent='Registration is currently closed. Contact your administrator for access.';}}).catch(()=>{});
+
   async function openConsole() {
     try {
       try { me = await api('/me'); }
