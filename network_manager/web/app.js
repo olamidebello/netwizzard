@@ -28,6 +28,43 @@
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
   }
+  let vpnSession = null;
+  let vpnLeaseTimer = null;
+  let vpnClockTimer = null;
+  let vpnZones = [];
+  const vpnNotice = text => { $('#vpn-status').textContent=text; };
+  function clearVpn(message='Disconnected') {
+    if(vpnLeaseTimer) clearInterval(vpnLeaseTimer);
+    if(vpnClockTimer) clearInterval(vpnClockTimer);
+    vpnLeaseTimer=null;vpnClockTimer=null;vpnSession=null;$('#vpn-expiry').textContent='';vpnNotice(message);
+  }
+  async function disconnectVpn() {
+    const session=vpnSession;clearVpn();
+    if(session)await api('/vpn/disconnect',{method:'POST',body:{session_id:session.session_id}}).catch(()=>{});
+  }
+  async function refreshVpn() {
+    vpnZones=await api('/vpn/zones');
+    options($('#vpn-connect-form [name=zone_id]'),vpnZones,'Select an assigned zone');
+    options($('#vpn-check-form [name=device_id]'),data.devices,'Select inventory device');
+  }
+  $('#vpn-refresh').addEventListener('click',()=>refreshVpn().catch(e=>vpnNotice(e.message)));
+  $('#vpn-connect-form').addEventListener('submit',async event=>{
+    event.preventDefault();const form=event.currentTarget;const button=form.querySelector('button');button.disabled=true;
+    try{
+      await disconnectVpn();
+      vpnSession=await api('/vpn/connect',{method:'POST',body:Object.fromEntries(new FormData(form))});
+      vpnNotice(vpnSession.message);
+      vpnLeaseTimer=setInterval(async()=>{if(!vpnSession)return;const id=vpnSession.session_id;try{const lease=await api('/vpn/heartbeat',{method:'POST',body:{session_id:id}});if(vpnSession?.session_id===id)Object.assign(vpnSession,lease);}catch(e){if(vpnSession?.session_id===id)clearVpn(e.message);}},30000);
+      vpnClockTimer=setInterval(()=>{if(!vpnSession)return;const seconds=Math.max(0,Math.ceil(vpnSession.expires_at-Date.now()/1000));$('#vpn-expiry').textContent=`${vpnSession.mode==='platform'?'Zone: '+vpnSession.zone:'Local client mode'} · lease ${seconds}s · maximum until ${new Date(vpnSession.deadline*1000).toLocaleTimeString()}`;if(!seconds)clearVpn('Session expired. Connect again.');},1000);
+    }catch(e){clearVpn(e.message);}finally{button.disabled=false;}
+  });
+  $('#vpn-disconnect').addEventListener('click',()=>disconnectVpn());
+  $('#vpn-check-form').addEventListener('submit',async event=>{
+    event.preventDefault();if(!vpnSession)return vpnNotice('Start a platform VPN session first.');
+    const fields=Object.fromEntries(new FormData(event.currentTarget));const button=event.currentTarget.querySelector('button');button.disabled=true;
+    try{const result=await api('/vpn/check',{method:'POST',body:{session_id:vpnSession.session_id,device_id:Number(fields.device_id),port:Number(fields.port)}});vpnNotice(`Device TCP port ${result.port} is reachable through ${result.zone}.`);}catch(e){vpnNotice(e.message);}finally{button.disabled=false;}
+  });
+  window.addEventListener('pagehide',()=>{if(vpnSession&&key)fetch('/vpn/disconnect',{method:'POST',headers:{Authorization:`Bearer ${key}`,'Content-Type':'application/json'},body:JSON.stringify({session_id:vpnSession.session_id}),keepalive:true}).catch(()=>{});});
   let accounts = [];
   function renderAccounts() {
     const list = $('#account-list'); list.replaceChildren();
@@ -49,6 +86,9 @@
     if (!list.children.length) empty(list, 'No accounts match your search.');
   }
   async function refreshPlatform() {
+    const zones=await api('/platform/vpn-zones'); const zoneList=$('#platform-vpn-zones');zoneList.replaceChildren();
+    zones.forEach(z=>card(zoneList,z.name,`Tenants: ${z.tenant_ids.join(', ')} · TCP ports: ${z.allowed_ports.join(', ')}`,z.enabled?'available':'disabled'));
+    if(!zones.length)empty(zoneList,'No platform VPN zones provisioned. Use deployment/vpn/install.yml with your VPN configuration.');
     accounts = await api('/platform/accounts');
     renderAccounts();
     $('#registration-open').checked = (await api('/platform/settings')).registration_open;
@@ -361,6 +401,8 @@
     const results = await Promise.all(collections.map((name) => api(`/${name}`)));
     collections.forEach((name, index) => { data[name] = results[index]; });
     render();
+    await refreshVpn().catch(error=>vpnNotice(error.message));
+    document.querySelectorAll('#vpn button').forEach(button=>{button.disabled=false;});
   }
   async function publicAuth(path, body) {
     const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),cache:'no-store'});
@@ -431,6 +473,7 @@
   });
   $('#lock').addEventListener('click', () => {
     if (refreshTimer) clearInterval(refreshTimer);
+    disconnectVpn();
     if (key) api('/auth/logout', {method:'POST'}).catch(()=>{});
     accounts=[]; $('#account-list').replaceChildren();
     key = ''; me = null; $('#identity').textContent='Netwizzard';

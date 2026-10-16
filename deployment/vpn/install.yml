@@ -1,0 +1,156 @@
+---
+- name: Install Netwizzard session-only VPN zones
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    netwizzard_repo: /opt/netwizzard
+    netwizzard_vpn_zones: []
+  tasks:
+    - name: Require Debian and an explicit nonempty zone inventory
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == 'Debian'
+          - netwizzard_vpn_zones | length > 0
+          - netwizzard_vpn_zones | length <= 50
+          - netwizzard_vpn_zones | map(attribute='id') | unique | length == netwizzard_vpn_zones | length
+          - netwizzard_vpn_zones | map(attribute='index') | unique | length == netwizzard_vpn_zones | length
+        fail_msg: Supply your own WireGuard peer configuration and tenant-assigned zones with -e @/root/netwizzard-vpn.yml. No VPN provider or keys are bundled.
+    - name: Validate each zone before changing network state
+      ansible.builtin.assert:
+        that:
+          - item.id is match('^[a-z][a-z0-9-]{0,15}$')
+          - item.index is integer
+          - item.index >= 1 and item.index <= 50
+          - item.tenant_ids | length > 0
+          - item.allowed_cidrs | length > 0
+          - item.allowed_ports | length > 0
+          - item.tunnel_address is match('^[0-9.]+/[0-9]+$')
+          - item.wireguard_config_src is match('^/')
+      loop: '{{ netwizzard_vpn_zones }}'
+      no_log: true
+    - name: Validate addresses, ports and tenant assignments
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - -c
+          - |
+            import ipaddress,json,sys
+            zones=json.load(sys.stdin)
+            for z in zones:
+                assert ipaddress.ip_interface(z['tunnel_address']).version == 4
+                assert type(z.get('enabled',True)) is bool
+                assert all(type(t) is int and t>0 for t in z['tenant_ids'])
+                assert all(type(p) is int and 1<=p<=65535 for p in z['allowed_ports'])
+                assert all(ipaddress.ip_network(c).version==4 for c in z['allowed_cidrs'])
+        stdin: '{{ netwizzard_vpn_zones | to_json }}'
+      changed_when: false
+      no_log: true
+    - name: Install platform update with database backup
+      ansible.builtin.command: bash deployment/install.sh
+      args:
+        chdir: '{{ netwizzard_repo }}'
+      changed_when: true
+    - name: Install VPN and isolated proxy packages
+      ansible.builtin.apt:
+        name: [wireguard-tools, iproute2, nftables, tinyproxy]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+    - name: Create public configuration directory
+      ansible.builtin.file:
+        path: /etc/netwizzard
+        state: directory
+        owner: root
+        group: netwizzard
+        mode: '0750'
+    - name: Create private VPN root directory
+      ansible.builtin.file:
+        path: /etc/netwizzard/vpn
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+    - name: Create private zone directories
+      ansible.builtin.file:
+        path: '/etc/netwizzard/vpn/{{ item.id }}'
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+      loop: '{{ netwizzard_vpn_zones }}'
+      no_log: true
+    - name: Copy private WireGuard peer configuration
+      ansible.builtin.copy:
+        src: '{{ item.wireguard_config_src }}'
+        dest: '/etc/netwizzard/vpn/{{ item.id }}/wireguard.conf'
+        owner: root
+        group: root
+        mode: '0600'
+      loop: '{{ netwizzard_vpn_zones }}'
+      no_log: true
+    - name: Install zone startup script
+      ansible.builtin.template:
+        src: templates/zone-up.sh.j2
+        dest: '/etc/netwizzard/vpn/{{ item.id }}/up.sh'
+        owner: root
+        group: root
+        mode: '0700'
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Install namespace firewall
+      ansible.builtin.template:
+        src: templates/firewall.nft.j2
+        dest: '/etc/netwizzard/vpn/{{ item.id }}/firewall.nft'
+        owner: root
+        group: root
+        mode: '0600'
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Install restricted CONNECT proxy configuration
+      ansible.builtin.template:
+        src: templates/tinyproxy.conf.j2
+        dest: '/etc/netwizzard/vpn/{{ item.id }}/tinyproxy.conf'
+        owner: root
+        group: root
+        mode: '0600'
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Install zone service units
+      ansible.builtin.template:
+        src: templates/zone.service.j2
+        dest: '/etc/systemd/system/netwizzard-zone-{{ item.id }}.service'
+        mode: '0644'
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Install proxy service units
+      ansible.builtin.template:
+        src: templates/proxy.service.j2
+        dest: '/etc/systemd/system/netwizzard-vpn-{{ item.id }}.service'
+        mode: '0644'
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Restart configured enabled VPN namespaces
+      ansible.builtin.systemd:
+        name: 'netwizzard-zone-{{ item.id }}'
+        daemon_reload: true
+        enabled: '{{ item.enabled | default(true) }}'
+        state: "{{ 'restarted' if item.enabled | default(true) else 'stopped' }}"
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Start configured proxy services
+      ansible.builtin.systemd:
+        name: 'netwizzard-vpn-{{ item.id }}'
+        enabled: '{{ item.enabled | default(true) }}'
+        state: "{{ 'restarted' if item.enabled | default(true) else 'stopped' }}"
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Build credential-free application zone inventory
+      ansible.builtin.set_fact:
+        app_vpn_zones: "{{ app_vpn_zones | default([]) + [{'id': item.id, 'name': item.name | default(item.id), 'tenant_ids': item.tenant_ids, 'enabled': item.enabled | default(true), 'proxy_host': '169.254.240.' ~ (item.index | int * 4 + 2) | string, 'proxy_port': 8888, 'allowed_ports': item.allowed_ports, 'allowed_cidrs': item.allowed_cidrs}] }}"
+      loop: '{{ netwizzard_vpn_zones }}'
+    - name: Publish application zone inventory without private keys
+      ansible.builtin.copy:
+        content: '{{ app_vpn_zones | to_nice_json }}'
+        dest: /etc/netwizzard/vpn-zones.json
+        owner: root
+        group: netwizzard
+        mode: '0640'
+    - name: Validate published application zone inventory
+      ansible.builtin.command: /usr/sbin/runuser -u netwizzard -- /usr/bin/python3 -c 'import app; app.vpn_zones()'
+      args:
+        chdir: /opt/netwizzard-app
+      changed_when: false

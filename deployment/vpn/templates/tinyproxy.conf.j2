@@ -1,0 +1,14 @@
+User tinyproxy
+Group tinyproxy
+Port 8888
+Listen 169.254.240.{{ item.index | int * 4 + 2 }}
+Timeout 5
+MaxClients 20
+PidFile "/run/netwizzard-vpn-{{ item.id }}/tinyproxy.pid"
+Syslog On
+LogLevel Error
+Allow 169.254.240.{{ item.index | int * 4 + 1 }}
+DisableViaHeader Yes
+{% for port in item.allowed_ports %}
+ConnectPort {{ port }}
+{% endfor %}

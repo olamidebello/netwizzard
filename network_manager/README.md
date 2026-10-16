@@ -1,3 +1,7 @@
+## Session VPN
+
+The **Session VPN** tab lets tenant users choose their computer's existing VPN for browser access or an assigned platform zone for interactive device TCP checks. Platform-zone sessions expire after 90 seconds without heartbeat, have a one-hour absolute maximum, and disconnect on sign-out. Only the tab's device connectivity checks use the VPN zone; other actions and scheduled jobs keep their existing routing. No VPN keys are uploaded through the GUI. Super admins can view zone assignments. See [VPN setup and Ansible deployment](../deployment/vpn/README.md) for actual WireGuard peer requirements, provisioning and limitations.
+
 ## Account registration and dashboards
 
 The sign-in page supports email/password and existing API keys. New workspace registrations require platform-super-admin approval. Registration never accepts a tenant ID or role supplied by a visitor; approval creates a separate workspace with its first tenant administrator. Existing organization members use an administrator-issued user key to sign in and choose **My account → Enable or recover password login**. This binds their email/password to the same existing role and tenant. They should not register another workspace to join an existing organization.

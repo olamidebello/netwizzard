@@ -61,6 +61,7 @@
       <div id="platform-key" class="form-card" hidden><h3>One-time tenant admin key</h3><code></code><button id="platform-key-hide" type="button" class="secondary">Hide key</button></div>
       <div id="tenant-list" class="cards"></div>
       <h2>Tenant administrators</h2><div id="platform-admin-list" class="cards"></div>
+      <h2>Platform VPN zones</h2><p>Zones and tenant assignments are provisioned using the VPN Ansible playbook. Private keys are never shown here.</p><div id="platform-vpn-zones" class="cards"></div>
       <h2>Platform activity</h2><div id="platform-audit-list" class="cards"></div>
     </section>
     <section id="workspace" hidden>
@@ -81,7 +82,15 @@
         <button data-tab="automation">Automation</button>
         <button data-tab="administration">Users & scripts</button>
         <button data-tab="activity">Activity</button>
+        <button data-tab="vpn">Session VPN</button>
       </nav>
+      <section id="vpn" class="panel" hidden>
+        <div class="section-heading"><div><h2>Session VPN</h2><p>Choose your computer's existing VPN for browser access, or a platform VPN zone for interactive device connectivity checks.</p></div><button id="vpn-refresh" type="button" class="secondary">Refresh zones</button></div>
+        <div id="vpn-status" role="status" aria-live="polite">Disconnected</div><p id="vpn-expiry" class="small"></p>
+        <div class="forms automation-forms"><form id="vpn-connect-form" class="form-card"><h3>Connection mode</h3><label>VPN route<select name="mode"><option value="local">My computer's VPN</option><option value="platform">Platform VPN zone</option></select></label><label>Platform zone<select name="zone_id"><option value="">No zones loaded</option></select></label><p class="small">Local mode does not install or control a VPN client. Your browser uses your computer's existing connection. Only the device test below uses a selected platform zone. Scheduled jobs and other server actions keep their existing routing.</p><button>Start session</button><button id="vpn-disconnect" type="button" class="secondary">Disconnect</button></form>
+        <form id="vpn-check-form" class="form-card"><h3>Test an inventory device via VPN</h3><label>Device<select name="device_id" required></select></label><label>TCP port<input name="port" type="number" min="1" max="65535" value="443" required></label><p class="small">Numeric IPv4 inventory addresses only, restricted to your zone's allowed networks and ports. The check opens and closes a TCP connection; no login or device command is sent.</p><button>Test through zone</button></form></div>
+        <p class="small">This tab renews a 90-second lease, with a hard one-hour maximum. Disconnect and sign-out end the session immediately; closing the tab attempts disconnect, with lease expiry as a fallback. No VPN credentials are saved in your browser.</p>
+      </section>
       <section id="dashboard" class="panel"><div class="section-heading"><div><h2>Your dashboard</h2><p>Choose the views you need. Preferences follow your account.</p></div><label>Refresh<select id="refresh-interval"><option value="0">Manual</option><option value="30">Every 30 seconds</option><option value="60">Every minute</option></select></label></div>
         <div class="widget-controls"><label><input type="checkbox" data-widget="devices" checked> Devices</label><label><input type="checkbox" data-widget="tasks" checked> Tasks</label><label><input type="checkbox" data-widget="events" checked> Events</label></div>
         <div class="dashboard-grid"><div id="widget-devices" class="form-card"><h3>Devices</h3><div class="cards"></div></div><div id="widget-tasks" class="form-card"><h3>Tasks</h3><div class="cards"></div></div><div id="widget-events" class="form-card"><h3>Events</h3><div class="cards"></div></div></div>

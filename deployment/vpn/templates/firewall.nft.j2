@@ -1,0 +1,17 @@
+table inet netwizzard {
+  chain input {
+    type filter hook input priority 0; policy drop;
+    iifname "lo" accept
+    ct state established,related accept
+    iifname "nwp{{ item.index }}" ip saddr 169.254.240.{{ item.index | int * 4 + 1 }} tcp dport 8888 accept
+  }
+  chain output {
+    type filter hook output priority 0; policy drop;
+    oifname "lo" accept
+    oifname "wg0" accept
+    oifname "nwp{{ item.index }}" ip daddr 169.254.240.{{ item.index | int * 4 + 1 }} tcp sport 8888 ct state established accept
+  }
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+  }
+}

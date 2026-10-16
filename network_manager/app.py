@@ -9,6 +9,8 @@ import sqlite3
 import sys
 import re
 import time
+import socket
+import stat
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +31,7 @@ PORT = int(os.environ.get("NETWIZZARD_PORT", "8080"))
 SCHEMA = """
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS tenants(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+CREATE TABLE IF NOT EXISTS vpn_sessions(id TEXT PRIMARY KEY, tenant_id INTEGER NOT NULL REFERENCES tenants(id), principal_id INTEGER NOT NULL REFERENCES principals(id), auth_hash TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('local','platform')), zone_id TEXT, created_at REAL NOT NULL, expires_at REAL NOT NULL, deadline REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','active','suspended','rejected')), tenant_name TEXT NOT NULL DEFAULT '', principal_id INTEGER UNIQUE REFERENCES principals(id), platform_id INTEGER UNIQUE REFERENCES platform_admins(id), created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS account_sessions(token_hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id), expires_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_limits(bucket TEXT PRIMARY KEY, started REAL NOT NULL, attempts INTEGER NOT NULL);
@@ -152,6 +155,58 @@ def validate_device_metadata(db, tenant, data):
     if ref and (not ref.startswith("vault://") or len(ref) > 255 or any(c.isspace() for c in ref)):
         raise ValueError("Use a vault:// secret reference, never a credential value")
     return owner, ref
+
+
+def vpn_zones():
+    path = Path(os.environ.get("NETWIZZARD_VPN_ZONES", "/etc/netwizzard/vpn-zones.json"))
+    if not path.exists():
+        return []
+    info = path.stat()
+    if info.st_uid != 0 or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ValueError("VPN zone configuration must be root-owned and not writable by group or others")
+    zones = json.loads(path.read_text())
+    if not isinstance(zones, list) or len(zones)>50:
+        raise ValueError("Invalid server VPN zone configuration")
+    ids = set()
+    for zone in zones:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,15}", zone.get("id", "")) or zone["id"] in ids:
+            raise ValueError("Invalid VPN zone identifier")
+        ids.add(zone["id"])
+        if ipaddress.ip_address(zone["proxy_host"]) not in ipaddress.ip_network("169.254.240.0/24") or not 1 <= int(zone.get("proxy_port",8888)) <= 65535:
+            raise ValueError("VPN zone gateway must be on the dedicated local link")
+        if not zone.get("allowed_cidrs") or not zone.get("allowed_ports") or not isinstance(zone.get("tenant_ids"),list):
+            raise ValueError("VPN zone needs tenant, CIDR and port allowlists")
+        for cidr in zone["allowed_cidrs"]:
+            if ipaddress.ip_network(cidr).version != 4:
+                raise ValueError("VPN zones currently support IPv4 targets")
+        if any(type(port) is not int or not 1 <= port <= 65535 for port in zone["allowed_ports"]):
+            raise ValueError("Invalid VPN zone port")
+        if any(type(tid) is not int or tid < 1 for tid in zone["tenant_ids"]):
+            raise ValueError("Invalid VPN tenant assignment")
+    return zones
+
+
+def vpn_target_allowed(zone, address, port):
+    address = ipaddress.ip_address(address)
+    if address.version != 4 or address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified or address.is_reserved:
+        raise ValueError("Choose an IPv4 inventory address outside loopback, link-local and multicast ranges")
+    if port not in zone["allowed_ports"] or not any(address in ipaddress.ip_network(cidr) for cidr in zone["allowed_cidrs"]):
+        raise ValueError("Target address or port is outside this VPN zone's allowlist")
+    return str(address)
+
+
+def vpn_connect_check(zone, address, port):
+    # Fixed numeric inventory address prevents DNS rebinding. No shell or payload.
+    with socket.create_connection((zone["proxy_host"],int(zone.get("proxy_port",8888))),timeout=5) as connection:
+        connection.settimeout(5)
+        connection.sendall(f"CONNECT {address}:{port} HTTP/1.1\r\nHost: {address}:{port}\r\nConnection: close\r\n\r\n".encode("ascii"))
+        response = b""
+        while b"\r\n" not in response and len(response)<4096:
+            chunk = connection.recv(512)
+            if not chunk: break
+            response += chunk
+        status = response.split(b"\r\n",1)[0].split()
+        return len(status)>1 and status[0].startswith(b"HTTP/") and status[1]==b"200"
 
 
 def password_hash(password):
@@ -300,6 +355,7 @@ class Handler(BaseHTTPRequestHandler):
             db.execute("INSERT INTO account_sessions VALUES(?,?,?)", (hashlib.sha256(token.encode()).hexdigest(),account["id"],stamp+28800))
             return self.send(200, {"token":token,"expires_in":28800})
         if path == ["auth", "logout"] and method == "POST":
+            db.execute("DELETE FROM vpn_sessions WHERE auth_hash=?", (self.token_hash(),))
             db.execute("DELETE FROM account_sessions WHERE token_hash=?", (self.token_hash(),))
             return self.send(200, {"message":"Signed out"})
         account = self.session_account(db)
@@ -343,6 +399,58 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, {"api_key":token})
         return self.send(404, {"error":"Not found"})
 
+    def vpn_routes(self, db, method, path, user):
+        tenant, principal = user["tenant_id"], user["id"]
+        zones = [z for z in vpn_zones() if tenant in z["tenant_ids"] and z.get("enabled",True)]
+        if method == "GET" and path == ["vpn","zones"]:
+            return self.send(200, [{"id":z["id"],"name":z.get("name",z["id"]),"allowed_ports":z["allowed_ports"]} for z in zones])
+        if method != "POST": return self.send(404, {"error":"Not found"})
+        data = self.body()
+        stamp = time.time()
+        db.execute("DELETE FROM vpn_sessions WHERE expires_at<=? OR deadline<=?", (stamp,stamp))
+        if path == ["vpn","connect"]:
+            mode = data.get("mode")
+            if mode not in ("local","platform"): raise ValueError("Choose local or platform mode")
+            zone = next((z for z in zones if z["id"]==data.get("zone_id")),None)
+            if mode == "platform" and not zone:
+                return self.send(403, {"error":"VPN zone is unavailable or not assigned to your tenant"})
+            if db.execute("SELECT count(*) FROM vpn_sessions WHERE principal_id=?",(principal,)).fetchone()[0] >= 5:
+                return self.send(409, {"error":"Disconnect an existing VPN session before opening another"})
+            token = secrets.token_urlsafe(32)
+            db.execute("INSERT INTO vpn_sessions VALUES(?,?,?,?,?,?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(),tenant,principal,self.token_hash(),mode,zone["id"] if mode=="platform" else None,stamp,stamp+90,stamp+3600))
+            self.audit(db,user,"vpn_session_start", mode + (":"+zone["id"] if mode=="platform" else ""))
+            return self.send(201, {"session_id":token,"mode":mode,"zone":zone.get("name",zone["id"]) if mode=="platform" else None,"expires_at":stamp+90,"deadline":stamp+3600,"message":"Session ready. Test a device to verify VPN connectivity." if mode=="platform" else "Use your computer's VPN client. Netwizzard cannot inspect or control that client; server-side checks do not use your local VPN."})
+        sid = hashlib.sha256(str(data.get("session_id","")).encode()).hexdigest()
+        session = db.execute("SELECT * FROM vpn_sessions WHERE id=? AND tenant_id=? AND principal_id=? AND auth_hash=?", (sid,tenant,principal,self.token_hash())).fetchone()
+        if not session: return self.send(410, {"error":"VPN session expired or disconnected. Connect again."})
+        if path == ["vpn","disconnect"]:
+            db.execute("DELETE FROM vpn_sessions WHERE id=?",(sid,))
+            self.audit(db,user,"vpn_session_stop",session["mode"])
+            return self.send(200, {"connected":False})
+        zone = next((z for z in zones if z["id"]==session["zone_id"]),None)
+        if session["mode"]=="platform" and not zone:
+            db.execute("DELETE FROM vpn_sessions WHERE id=?",(sid,))
+            return self.send(410, {"error":"VPN zone access was withdrawn"})
+        if path == ["vpn","heartbeat"]:
+            expiry = min(stamp+90,session["deadline"])
+            db.execute("UPDATE vpn_sessions SET expires_at=? WHERE id=?",(expiry,sid))
+            return self.send(200, {"expires_at":expiry,"deadline":session["deadline"]})
+        if path == ["vpn","check"]:
+            if session["mode"] != "platform":
+                return self.send(409, {"error":"A local VPN runs on your computer. Choose a platform zone for server-side device checks."})
+            device = db.execute("SELECT id,address FROM devices WHERE id=? AND tenant_id=?", (int(data["device_id"]),tenant)).fetchone()
+            if not device: return self.send(404, {"error":"Device not found"})
+            port = data.get("port")
+            if type(port) is not int: raise ValueError("Choose a numeric TCP port")
+            address = vpn_target_allowed(zone,device["address"],port)
+            # End this short write transaction before a bounded network check.
+            db.commit()
+            try: reachable = vpn_connect_check(zone,address,port)
+            except (OSError,TimeoutError): reachable = False
+            self.audit(db,user,"vpn_connectivity_check",f"{device['id']}:{port}:{zone['id']}")
+            return self.send(200 if reachable else 502, {"reachable":reachable,"device_id":device["id"],"port":port,"zone":zone.get("name",zone["id"]),**({} if reachable else {"error":"VPN device connection failed. No direct route was attempted."})})
+        return self.send(404, {"error":"Not found"})
+
     def audit(self, db, user, action, target):
         db.execute("INSERT INTO audit(tenant_id,principal_id,action,target,created_at) VALUES(?,?,?,?,?)",
                    (user["tenant_id"], user["id"], action, target, now()))
@@ -357,6 +465,8 @@ class Handler(BaseHTTPRequestHandler):
             if path[0] == "platform":
                 platform = self.platform_principal(db)
                 if not platform: return self.send(401, {"error": "Platform administrator key required"})
+                if path == ["platform", "vpn-zones"] and method == "GET":
+                    return self.send(200, [{"id":z["id"],"name":z.get("name",z["id"]),"tenant_ids":z["tenant_ids"],"enabled":z.get("enabled",True),"allowed_ports":z["allowed_ports"],"allowed_cidrs":z["allowed_cidrs"]} for z in vpn_zones()])
                 if path == ["platform", "accounts"] and method == "GET":
                     return self.send(200, [dict(r) for r in db.execute("SELECT id,email,name,status,tenant_name,principal_id,platform_id,created_at FROM accounts ORDER BY id DESC LIMIT 1000")])
                 if path == ["platform", "settings"] and method in ("GET", "POST"):
@@ -463,6 +573,8 @@ class Handler(BaseHTTPRequestHandler):
             user = self.principal(db)
             if not user:
                 return self.send(401, {"error": "Authentication required"})
+            if path[0] == "vpn":
+                return self.vpn_routes(db,method,path,user)
             tenant = user["tenant_id"]
             role = user["role"]
             if path == ["me"] and method == "GET":

@@ -136,6 +136,80 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.call("GET","/me",key=token)[0],401)
         self.assertEqual(self.login("second@example.com")[0],403)
 
+    def zone_config(self):
+        from pathlib import Path
+        path=Path(self.temp.name)/"zones.json"
+        path.write_text(json.dumps([{"id":"office","name":"Office VPN","proxy_host":"169.254.240.6","tenant_ids":[1],"allowed_cidrs":["10.20.0.0/16"],"allowed_ports":[22,443]}]))
+        return str(path)
+
+    def test_vpn_zone_scope_session_owner_expiry_and_logout(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ,{"NETWIZZARD_VPN_ZONES":self.zone_config()}):
+            self.assertEqual(len(self.call("GET","/vpn/zones")[1]),1)
+            self.assertEqual(self.call("GET","/vpn/zones",key="b")[1],[])
+            self.assertEqual(self.call("POST","/vpn/connect",key="b",data={"mode":"platform","zone_id":"office"})[0],403)
+            result=self.call("POST","/vpn/connect",data={"mode":"platform","zone_id":"office"})[1]
+            sid=result["session_id"]
+            self.assertNotIn("proxy_host",result)
+            self.assertEqual(self.call("POST","/vpn/heartbeat",key="c",data={"session_id":sid})[0],410)
+            self.assertEqual(self.call("POST","/vpn/heartbeat",data={"session_id":sid})[0],200)
+            self.call("POST","/auth/logout",data={})
+            self.assertEqual(self.call("POST","/vpn/heartbeat",data={"session_id":sid})[0],410)
+            sid=self.call("POST","/vpn/connect",data={"mode":"platform","zone_id":"office"})[1]["session_id"]
+            with app.connect() as db:db.execute("UPDATE vpn_sessions SET deadline=0")
+            self.assertEqual(self.call("POST","/vpn/heartbeat",data={"session_id":sid})[0],410)
+
+    def test_vpn_device_allowlist_and_failure_never_fall_back(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ,{"NETWIZZARD_VPN_ZONES":self.zone_config()}):
+            device=self.call("POST","/devices",data={"name":"vpn-target","address":"10.20.0.4","kind":"router"})[1]["id"]
+            foreign=self.call("POST","/devices",key="b",data={"name":"other","address":"10.20.0.5","kind":"router"})[1]["id"]
+            sid=self.call("POST","/vpn/connect",data={"mode":"platform","zone_id":"office"})[1]["session_id"]
+            def check(device_id=device,port=443):return self.call("POST","/vpn/check",data={"session_id":sid,"device_id":device_id,"port":port})
+            with patch.object(app,"vpn_connect_check",return_value=True) as proxy:
+                self.assertEqual(check()[0],200)
+                proxy.assert_called_once()
+                self.assertEqual(check(port=80)[0],400)
+                self.assertEqual(check(device_id=foreign)[0],404)
+            with patch.object(app,"vpn_connect_check",side_effect=OSError("no VPN")) as proxy:
+                self.assertEqual(check()[0],502)
+                proxy.assert_called_once()
+            with app.connect() as db:db.execute("UPDATE devices SET address='169.254.169.254' WHERE id=?",(device,))
+            with patch.object(app,"vpn_connect_check") as proxy:
+                self.assertEqual(check()[0],400)
+                proxy.assert_not_called()
+
+    def test_local_vpn_mode_has_no_server_network_effect(self):
+        from unittest.mock import patch
+        with patch.object(app,"vpn_zones",return_value=[]),patch.object(app,"vpn_connect_check") as proxy:
+            sid=self.call("POST","/vpn/connect",data={"mode":"local"})[1]["session_id"]
+            self.assertEqual(self.call("POST","/vpn/check",data={"session_id":sid,"device_id":1,"port":443})[0],409)
+            proxy.assert_not_called()
+            self.assertEqual(self.call("POST","/vpn/disconnect",data={"session_id":sid})[0],200)
+            self.assertEqual(self.call("POST","/vpn/heartbeat",data={"session_id":sid})[0],410)
+
+    def test_vpn_zone_withdrawal_and_session_limit(self):
+        from unittest.mock import patch
+        from pathlib import Path
+        path=self.zone_config()
+        with patch.dict(os.environ,{"NETWIZZARD_VPN_ZONES":path}):
+            sid=self.call("POST","/vpn/connect",data={"mode":"platform","zone_id":"office"})[1]["session_id"]
+            zones=json.loads(Path(path).read_text());zones[0]["tenant_ids"]=[];Path(path).write_text(json.dumps(zones))
+            self.assertEqual(self.call("POST","/vpn/heartbeat",data={"session_id":sid})[0],410)
+            for _ in range(5):self.assertEqual(self.call("POST","/vpn/connect",data={"mode":"local"})[0],201)
+            self.assertEqual(self.call("POST","/vpn/connect",data={"mode":"local"})[0],409)
+
+    def test_vpn_connect_proxy_protocol(self):
+        from unittest.mock import patch,MagicMock
+        connection=MagicMock()
+        connection.recv.return_value=b"HTTP/1.1 200 Connection established\r\n\r\n"
+        with patch.object(app.socket,"create_connection") as factory:
+            factory.return_value.__enter__.return_value=connection
+            self.assertTrue(app.vpn_connect_check({"proxy_host":"169.254.240.6"},"10.20.0.4",443))
+            connection.sendall.assert_called_once_with(b"CONNECT 10.20.0.4:443 HTTP/1.1\r\nHost: 10.20.0.4:443\r\nConnection: close\r\n\r\n")
+            connection.recv.return_value=b"HTTP/1.1 403 Forbidden\r\n"
+            self.assertFalse(app.vpn_connect_check({"proxy_host":"169.254.240.6"},"10.20.0.4",443))
+
     def test_tenant_scope_for_devices_and_links(self):
         _, a = self.call("POST", "/devices", data={"name": "a", "address": "192.0.2.1", "kind": "router"})
         _, b = self.call("POST", "/devices", key="b", data={"name": "b", "address": "192.0.2.2", "kind": "router"})

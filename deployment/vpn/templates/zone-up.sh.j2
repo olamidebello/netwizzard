@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+namespace=nw-{{ item.id }}
+host_link=nwh{{ item.index }}
+peer_link=nwp{{ item.index }}
+wg_link=nwwg{{ item.index }}
+cleanup() {
+  ip netns delete "$namespace" 2>/dev/null || true
+  ip link delete "$host_link" 2>/dev/null || true
+  ip link delete "$wg_link" 2>/dev/null || true
+}
+cleanup
+trap cleanup ERR
+ip netns add "$namespace"
+ip link add "$host_link" type veth peer name "$peer_link"
+ip link set "$peer_link" netns "$namespace"
+ip address add 169.254.240.{{ item.index | int * 4 + 1 }}/30 dev "$host_link"
+ip link set "$host_link" up
+ip -n "$namespace" address add 169.254.240.{{ item.index | int * 4 + 2 }}/30 dev "$peer_link"
+ip -n "$namespace" link set "$peer_link" up
+ip -n "$namespace" link set lo up
+# Create and configure WireGuard on the host so its encrypted UDP socket keeps
+# the host route. Move only its cleartext interface into the isolated namespace.
+ip link add "$wg_link" type wireguard
+wg setconf "$wg_link" <(wg-quick strip /etc/netwizzard/vpn/{{ item.id }}/wireguard.conf)
+ip link set "$wg_link" netns "$namespace"
+ip -n "$namespace" link set "$wg_link" name wg0
+ip -n "$namespace" address add {{ item.tunnel_address | quote }} dev wg0
+ip -n "$namespace" link set wg0 mtu 1380 up
+ip netns exec "$namespace" nft -f /etc/netwizzard/vpn/{{ item.id }}/firewall.nft
+ip -n "$namespace" route add default dev wg0
+trap - ERR

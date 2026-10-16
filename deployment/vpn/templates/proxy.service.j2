@@ -1,0 +1,15 @@
+[Unit]
+Description=Netwizzard VPN zone {{ item.id }} connectivity proxy
+After=netwizzard-zone-{{ item.id }}.service
+Requires=netwizzard-zone-{{ item.id }}.service
+PartOf=netwizzard-zone-{{ item.id }}.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/install -d -o tinyproxy -g tinyproxy -m 0750 /run/netwizzard-vpn-{{ item.id }}
+ExecStart=/usr/sbin/ip netns exec nw-{{ item.id }} /usr/bin/tinyproxy -d -c /etc/netwizzard/vpn/{{ item.id }}/tinyproxy.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

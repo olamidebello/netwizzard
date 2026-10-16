@@ -1,0 +1,15 @@
+[Unit]
+Description=Netwizzard isolated WireGuard zone {{ item.id }}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/etc/netwizzard/vpn/{{ item.id }}/up.sh
+ExecStop=-/usr/sbin/ip netns delete nw-{{ item.id }}
+ExecStopPost=-/usr/sbin/ip link delete nwh{{ item.index }}
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

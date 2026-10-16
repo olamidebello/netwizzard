@@ -11,3 +11,5 @@ summary{cursor:pointer;font-weight:600;padding:16px 0;color:#126e73}details+deta
 #account-list .card{flex-wrap:wrap}#account-list .card>div:first-child{flex:1 1 180px;min-width:0}.account{gap:6px}@media(max-width:400px){.brand small{display:none}.topbar{gap:4px}.account button{font-size:.75rem;padding:7px}}
 
 .brand-logo{display:block;width:150px;height:82px;object-fit:contain;background:white;border-radius:8px}.login-logo{display:block;width:100%;max-width:340px;height:auto;margin:0 auto 16px;border-radius:10px}.topbar{background:#052c50}@media(max-width:600px){.brand-logo{width:112px;height:72px}}
+
+#vpn-status{padding:16px;border-radius:10px;background:#e7f2f0;overflow-wrap:anywhere;margin:16px 0}#vpn-expiry{min-height:1.3em}

@@ -1,0 +1,13 @@
+# Copy outside Git, replace values and encrypt with ansible-vault if appropriate.
+# This file contains no working VPN credentials or enabled zone.
+netwizzard_vpn_zones: []
+# netwizzard_vpn_zones:
+#   - id: office
+#     name: Office network
+#     index: 1                  # Unique number 1..50; reserves a /30 link
+#     tenant_ids: [1]            # Only these Netwizzard tenant IDs may use it
+#     tunnel_address: 10.66.0.2/32
+#     wireguard_config_src: /root/secrets/office-wireguard.conf
+#     allowed_cidrs: [10.20.0.0/16]
+#     allowed_ports: [22, 443]
+#     enabled: true
